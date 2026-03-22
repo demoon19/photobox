@@ -1,0 +1,15 @@
+{
+  "id": "classic_strip",
+  "name": "Classic Strip",
+  "description": "4 foto vertikal gaya photobox klasik",
+  "photo_count": 4,
+  "canvas_size": [600, 1900],
+  "background_image": "classic_strip.png",
+  "background_color": "#ffffff",
+  "slots": [
+    {"id": 1, "x": 50,  "y": 50,   "w": 500, "h": 380, "shape": "rect", "round_radius": 0},
+    {"id": 2, "x": 50,  "y": 480,  "w": 500, "h": 380, "shape": "rect", "round_radius": 0},
+    {"id": 3, "x": 50,  "y": 910,  "w": 500, "h": 380, "shape": "rect", "round_radius": 0},
+    {"id": 4, "x": 50,  "y": 1340, "w": 500, "h": 380, "shape": "rect", "round_radius": 0}
+  ]
+}

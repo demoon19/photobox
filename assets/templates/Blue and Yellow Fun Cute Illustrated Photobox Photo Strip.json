@@ -1,0 +1,41 @@
+{
+  "id": "Blue and Yellow Fun Cute Illustrated Photobox Photo Strip",
+  "name": "Blue And Yellow Fun Cute Illustrated Photobox Photo Strip",
+  "description": "Template dengan 3 foto",
+  "photo_count": 3,
+  "canvas_size": [
+    591,
+    1772
+  ],
+  "background_image": "Blue and Yellow Fun Cute Illustrated Photobox Photo Strip.png",
+  "background_color": "#ffffff",
+  "slots": [
+    {
+      "id": 1,
+      "x": 102,
+      "y": 184,
+      "w": 387,
+      "h": 340,
+      "shape": "rect",
+      "round_radius": 0
+    },
+    {
+      "id": 2,
+      "x": 102,
+      "y": 717,
+      "w": 387,
+      "h": 341,
+      "shape": "rect",
+      "round_radius": 0
+    },
+    {
+      "id": 3,
+      "x": 102,
+      "y": 1250,
+      "w": 387,
+      "h": 341,
+      "shape": "rect",
+      "round_radius": 0
+    }
+  ]
+}

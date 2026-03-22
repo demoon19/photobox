@@ -1,0 +1,41 @@
+{
+  "id": "Pink and Green Playful Photo Strip Design",
+  "name": "Pink And Green Playful Photo Strip Design",
+  "description": "Template dengan 3 foto",
+  "photo_count": 3,
+  "canvas_size": [
+    707,
+    2000
+  ],
+  "background_image": "Pink and Green Playful Photo Strip Design.png",
+  "background_color": "#ffffff",
+  "slots": [
+    {
+      "id": 1,
+      "x": 79,
+      "y": 205,
+      "w": 530,
+      "h": 583,
+      "shape": "round",
+      "round_radius": 0
+    },
+    {
+      "id": 2,
+      "x": 79,
+      "y": 820,
+      "w": 529,
+      "h": 528,
+      "shape": "rect",
+      "round_radius": 0
+    },
+    {
+      "id": 3,
+      "x": 74,
+      "y": 1377,
+      "w": 534,
+      "h": 585,
+      "shape": "round",
+      "round_radius": 0
+    }
+  ]
+}

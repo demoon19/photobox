@@ -1,0 +1,41 @@
+{
+  "id": "Blue and Gray Modern Music Newspaper Document",
+  "name": "Blue And Gray Modern Music Newspaper Document",
+  "description": "Template dengan 3 foto",
+  "photo_count": 3,
+  "canvas_size": [
+    1414,
+    2000
+  ],
+  "background_image": "Blue and Gray Modern Music Newspaper Document.png",
+  "background_color": "#ffffff",
+  "slots": [
+    {
+      "id": 1,
+      "x": 99,
+      "y": 1232,
+      "w": 499,
+      "h": 256,
+      "shape": "rect",
+      "round_radius": 0
+    },
+    {
+      "id": 2,
+      "x": 695,
+      "y": 650,
+      "w": 629,
+      "h": 420,
+      "shape": "rect",
+      "round_radius": 0
+    },
+    {
+      "id": 3,
+      "x": 1033,
+      "y": 1611,
+      "w": 308,
+      "h": 249,
+      "shape": "rect",
+      "round_radius": 0
+    }
+  ]
+}

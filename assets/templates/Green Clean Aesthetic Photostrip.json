@@ -1,0 +1,50 @@
+{
+  "id": "Green Clean Aesthetic Photostrip",
+  "name": "Green Clean Aesthetic Photostrip",
+  "description": "Template dengan 4 foto",
+  "photo_count": 4,
+  "canvas_size": [
+    707,
+    2000
+  ],
+  "background_image": "Green Clean Aesthetic Photostrip.png",
+  "background_color": "#ffffff",
+  "slots": [
+    {
+      "id": 1,
+      "x": 38,
+      "y": 35,
+      "w": 631,
+      "h": 360,
+      "shape": "rect",
+      "round_radius": 0
+    },
+    {
+      "id": 2,
+      "x": 38,
+      "y": 445,
+      "w": 631,
+      "h": 360,
+      "shape": "rect",
+      "round_radius": 0
+    },
+    {
+      "id": 3,
+      "x": 38,
+      "y": 856,
+      "w": 631,
+      "h": 360,
+      "shape": "rect",
+      "round_radius": 0
+    },
+    {
+      "id": 4,
+      "x": 38,
+      "y": 1266,
+      "w": 631,
+      "h": 360,
+      "shape": "rect",
+      "round_radius": 0
+    }
+  ]
+}

@@ -1,0 +1,41 @@
+{
+  "id": "Purple and Pink Trendy Pop Fun Photobox Template Photo Strip",
+  "name": "Purple And Pink Trendy Pop Fun Photobox Template Photo Strip",
+  "description": "Template dengan 3 foto",
+  "photo_count": 3,
+  "canvas_size": [
+    591,
+    1772
+  ],
+  "background_image": "Purple and Pink Trendy Pop Fun Photobox Template Photo Strip.png",
+  "background_color": "#ffffff",
+  "slots": [
+    {
+      "id": 1,
+      "x": 105,
+      "y": 100,
+      "w": 381,
+      "h": 381,
+      "shape": "rect",
+      "round_radius": 0
+    },
+    {
+      "id": 2,
+      "x": 105,
+      "y": 645,
+      "w": 381,
+      "h": 381,
+      "shape": "rect",
+      "round_radius": 0
+    },
+    {
+      "id": 3,
+      "x": 105,
+      "y": 1191,
+      "w": 381,
+      "h": 380,
+      "shape": "rect",
+      "round_radius": 0
+    }
+  ]
+}

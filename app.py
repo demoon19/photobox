@@ -1,0 +1,1245 @@
+"""
+PhotoBox Backend - Canon 700D Integration
+Flask server yang menangani: kamera, template, Google Drive, QR Code
+"""
+
+import os
+import io
+import json
+import time
+import base64
+import threading
+import subprocess
+from datetime import datetime
+from pathlib import Path
+
+from flask import Flask, jsonify, request, send_file, send_from_directory
+from flask_cors import CORS
+from flask_socketio import SocketIO, emit
+from PIL import Image, ImageDraw, ImageFont, ImageFilter
+import qrcode
+
+# Google Drive
+from google.oauth2.credentials import Credentials
+from google_auth_oauthlib.flow import InstalledAppFlow
+from google.auth.transport.requests import Request
+from googleapiclient.discovery import build
+from googleapiclient.http import MediaFileUpload
+import pickle
+
+app = Flask(__name__, static_folder='frontend', static_url_path='')
+app.config['SECRET_KEY'] = 'photobox-secret-2024'
+CORS(app)
+socketio = SocketIO(app, cors_allowed_origins="*")
+
+# ─── Konfigurasi ───────────────────────────────────────────────────────────────
+BASE_DIR = Path(__file__).parent
+PHOTOS_DIR = BASE_DIR / 'photos'
+SESSIONS_DIR = BASE_DIR / 'sessions'
+TEMPLATES_DIR = BASE_DIR / 'templates'
+FONTS_DIR = BASE_DIR / 'fonts'
+ASSETS_DIR = BASE_DIR / 'assets'
+
+for d in [PHOTOS_DIR, SESSIONS_DIR, TEMPLATES_DIR, FONTS_DIR, ASSETS_DIR]:
+    d.mkdir(exist_ok=True)
+
+GOOGLE_DRIVE_FOLDER = "PhotoBox Sessions"
+SCOPES = ['https://www.googleapis.com/auth/drive.file']
+
+# State global
+camera_connected = False
+current_session = None
+preview_active = False
+
+
+# ─── Kamera Canon via digiCamControl HTTP API ────────────────────────────────
+#
+# digiCamControl menyediakan HTTP server di port 5513.
+# Ini JAUH lebih reliable daripada memanggil CameraControlCmd.exe via subprocess.
+#
+# CARA PAKAI:
+#   1. Buka digiCamControl (biarkan tetap terbuka / jalan di background)
+#   2. Di digiCamControl: Tools → Settings → Web Server → centang "Enable web server"
+#      (biasanya sudah aktif secara default di port 5513)
+#   3. Jalankan python app.py
+#
+
+import sys
+import glob
+import urllib.request
+import urllib.error
+
+DCC_HOST    = "http://localhost:5513"   # digiCamControl web API
+MJPEG_URL   = "http://127.0.0.1:5514/live"  # MJPEG stream untuk live preview
+PREVIEW_TMP = str(BASE_DIR / 'photos' / '_preview_tmp.jpg')
+
+
+def dcc_get(endpoint: str, timeout: int = 10):
+    """Helper: HTTP GET ke digiCamControl web API"""
+    url = f"{DCC_HOST}{endpoint}"
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as resp:
+            return resp.read(), resp.status
+    except urllib.error.URLError as e:
+        raise ConnectionError(f"digiCamControl tidak merespons di {DCC_HOST}: {e}")
+
+
+def check_camera() -> bool:
+    """
+    Cek apakah digiCamControl web server aktif.
+    HANYA ping endpoint ringan — TIDAK hit /liveview.jpg
+    karena bisa crash DCC jika Live View belum aktif.
+    """
+    # Cukup ping root atau devices.json — tidak trigger Live View
+    for endpoint in ["/devices.json", "/"]:
+        try:
+            urllib.request.urlopen(f"{DCC_HOST}{endpoint}", timeout=3)
+            print("✅ digiCamControl web server aktif")
+            return True
+        except Exception:
+            continue
+    print("⚠️  digiCamControl tidak merespons di port 5513")
+    return False
+
+
+def capture_photo(output_path: str) -> bool:
+    """
+    Ambil foto via digiCamControl HTTP API.
+    Strategi:
+      1. Panggil /capture via HTTP → DCC trigger kamera
+      2. Cari file JPG terbaru di folder session DCC (dari screenshot: D:/app file/digicamControl)
+      3. Copy ke output_path kita
+    """
+    import glob as _glob, shutil, json as _json
+
+    try:
+        os.makedirs(os.path.dirname(output_path), exist_ok=True)
+        print(f"📸 Trigger capture via HTTP...")
+
+        # Catat waktu sebelum capture untuk filter file baru
+        capture_time = time.time()
+
+        # Trigger capture via HTTP API digiCamControl
+        # DCC web API endpoint untuk capture: GET /capture
+        # Ref: http://digicamcontrol.com/doc/serverapi
+        triggered = False
+        for capture_endpoint in ["/capture", "/?CMD=Capture", "/session/capture"]:
+            try:
+                print(f"   Trigger capture: {DCC_HOST}{capture_endpoint}")
+                data, status = dcc_get(capture_endpoint, timeout=30)
+                print(f"   Response ({status}): {data[:150]}")
+                triggered = True
+                break
+            except Exception as e:
+                print(f"   Endpoint {capture_endpoint} gagal: {e}")
+                continue
+
+        if not triggered:
+            print("❌ Semua endpoint capture gagal")
+            print("   Pastikan digiCamControl terbuka dan web server aktif di port 5513")
+
+        # Tunggu kamera selesai menulis file (shutter + transfer)
+        print("   Menunggu kamera selesai...")
+        time.sleep(3)
+
+        # Folder penyimpanan DCC sudah terkonfirmasi dari CMD:
+        # D:/app file/digicamControl/DSC_XXXX.JPG
+        dcc_base = os.path.join("D:/", "app file", "digicamControl", "foto")
+        search_dirs = [dcc_base]
+
+        # Tambah subfolder jika ada
+        if os.path.exists(dcc_base):
+            for sub in os.listdir(dcc_base):
+                subpath = os.path.join(dcc_base, sub)
+                if os.path.isdir(subpath):
+                    search_dirs.append(subpath)
+
+        print(f"   Mencari file baru di {len(search_dirs)} folder...")
+
+        newest_file = None
+        newest_mtime = capture_time - 2  # toleransi 2 detik sebelum capture
+
+        for d in search_dirs:
+            if not os.path.exists(d):
+                continue
+            for ext in ["*.jpg", "*.JPG", "*.jpeg", "*.JPEG"]:
+                for f in _glob.glob(os.path.join(d, "**", ext), recursive=True):
+                    try:
+                        mtime = os.path.getmtime(f)
+                        if mtime > newest_mtime:
+                            newest_mtime = mtime
+                            newest_file = f
+                    except Exception:
+                        pass
+
+        if newest_file:
+            shutil.copy2(newest_file, output_path)
+            print(f"✅ Foto berhasil: {newest_file}")
+            return True
+
+        # Terakhir: coba download snapshot dari live view sebagai fallback
+        print("   Mencoba fallback snapshot dari live view...")
+        try:
+            snap_data, _ = dcc_get("/liveview.jpg", timeout=5)
+            if snap_data and len(snap_data) > 5000:
+                with open(output_path, 'wb') as f:
+                    f.write(snap_data)
+                print("✅ Fallback snapshot dari live view berhasil")
+                return True
+        except Exception:
+            pass
+
+        print("❌ Capture gagal. Cek:")
+        print(f"   - Folder DCC: {dcc_base}")
+        print("   - Pastikan Image Quality = JPEG (bukan RAW)")
+        print("   - Pastikan kamera tidak sleep")
+        return False
+
+    except Exception as e:
+        print(f"Capture error tak terduga: {e}")
+        return False
+
+
+def start_live_preview():
+    """
+    Live preview via digiCamControl HTTP API.
+    Endpoint: GET /liveview.jpg  → mengembalikan JPEG frame langsung.
+    Ini sangat cepat dan reliable karena tidak perlu subprocess.
+    """
+    global preview_active
+    preview_active = True
+
+    def preview_loop():
+        """
+        Live preview via MJPEG stream port 5514.
+        MJPEG stream hanya aktif saat Live View sudah dinyalakan di DCC.
+        Tidak ada fallback ke /liveview.jpg agar DCC tidak crash.
+        """
+        consecutive_errors = 0
+        print("▶ Preview loop dimulai — menunggu MJPEG stream dari DCC...")
+
+        while preview_active:
+            try:
+                req = urllib.request.Request(MJPEG_URL)
+                with urllib.request.urlopen(req, timeout=5) as resp:
+                    raw = b""
+                    while preview_active:
+                        chunk = resp.read(4096)
+                        if not chunk:
+                            break
+                        raw += chunk
+                        # Cari frame JPEG lengkap
+                        start = raw.find(b'\xff\xd8')
+                        end   = raw.find(b'\xff\xd9')
+                        if start != -1 and end != -1 and end > start:
+                            jpeg = raw[start:end+2]
+                            if len(jpeg) > 1000:  # frame valid
+                                img_b64 = base64.b64encode(jpeg).decode()
+                                socketio.emit('preview_frame', {
+                                    'image': f'data:image/jpeg;base64,{img_b64}'
+                                })
+                                consecutive_errors = 0
+                            raw = raw[end+2:]  # buang frame yang sudah diproses
+
+            except Exception as e:
+                consecutive_errors += 1
+                if consecutive_errors == 1:
+                    print(f"⚠️  MJPEG stream belum tersedia: {e}")
+                    print("   → Tekan tombol [Lv] di digiCamControl untuk aktifkan Live View")
+                if consecutive_errors > 5:
+                    print("⏹  Preview berhenti — Live View tidak aktif di DCC")
+                    break
+                time.sleep(2)  # tunggu sebelum retry — jangan spam DCC
+                continue
+
+            time.sleep(0.05)
+
+    thread = threading.Thread(target=preview_loop, daemon=True)
+    thread.start()
+    print("▶ Live preview dimulai via HTTP API")
+
+# ─── Template Engine ─────────────────────────────────────────────────────────
+#
+# Template dibaca dari: assets/templates/*.json
+# Gambar background dari: assets/templates/*.png  (hasil download Canva)
+# Thumbnail otomatis dibuat di: assets/thumbnails/*.jpg
+#
+
+ASSETS_TEMPLATES_DIR = BASE_DIR / 'assets' / 'templates'
+ASSETS_THUMBS_DIR    = BASE_DIR / 'assets' / 'thumbnails'
+ASSETS_TEMPLATES_DIR.mkdir(parents=True, exist_ok=True)
+ASSETS_THUMBS_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def load_templates_from_disk() -> dict:
+    """
+    Baca template dari assets/templates/.
+    Prioritas:
+      1. Jika ada .json → pakai JSON (manual atau auto-generated)
+      2. Jika ada .png tapi TIDAK ada .json → auto-detect slot dari area transparan,
+         simpan JSON otomatis, lalu pakai
+    Sehingga user cukup taruh PNG saja — sistem otomatis proses.
+    """
+    import json as _json
+    templates = {}
+
+    # ── 1. Load semua JSON yang ada ──────────────────────────────────────────
+    json_ids = set()
+    for jf in sorted(ASSETS_TEMPLATES_DIR.glob('*.json')):
+        try:
+            with open(jf, encoding='utf-8') as f:
+                cfg = _json.load(f)
+            tid = cfg.get('id') or jf.stem
+            cfg['id'] = tid
+            if 'slots' in cfg and 'photo_slots' not in cfg:
+                cfg['photo_slots'] = cfg['slots']
+            templates[tid] = cfg
+            json_ids.add(jf.stem)
+        except Exception as e:
+            print(f"⚠️  Gagal load {jf.name}: {e}")
+
+    # ── 2. Scan PNG yang belum punya JSON → auto-detect ──────────────────────
+    for png_path in sorted(ASSETS_TEMPLATES_DIR.glob('*.png')):
+        tid = png_path.stem
+        if tid in json_ids:
+            continue  # sudah ada JSON, skip
+
+        print(f"🔍 PNG tanpa JSON ditemukan: {png_path.name} → auto-detect slot...")
+        try:
+            cfg = auto_generate_json_from_png(str(png_path), template_id=tid)
+            if 'slots' in cfg and 'photo_slots' not in cfg:
+                cfg['photo_slots'] = cfg['slots']
+            templates[tid] = cfg
+            json_ids.add(tid)
+            print(f"  ✅ Template '{tid}' berhasil dibuat dari PNG")
+        except Exception as e:
+            print(f"  ❌ Auto-detect gagal untuk {png_path.name}: {e}")
+
+    return templates
+
+
+def detect_slots_from_png(png_path: str, sort_order: str = 'top_bottom_col') -> list:
+    """
+    Otomatis deteksi slot foto dari area TRANSPARAN (alpha=0) di PNG Canva.
+
+    Algoritma:
+      1. Baca channel alpha PNG
+      2. Threshold: pixel dengan alpha < 10 = transparan = area slot
+      3. Temukan connected components (blob) menggunakan flood fill sederhana
+      4. Filter blob terlalu kecil (noise)
+      5. Urutkan sesuai sort_order:
+         - 'top_bottom_col': kiri ke kanan per kolom, atas ke bawah (default)
+         - 'reading': kiri ke kanan, atas ke bawah (seperti membaca)
+
+    Return: list slot dict [{id, x, y, w, h, shape, round_radius}]
+    """
+    import numpy as np
+
+    img = Image.open(png_path).convert('RGBA')
+    w, h = img.size
+    arr = np.array(img)
+
+    # Channel alpha — 0 = transparan, 255 = opaque
+    alpha = arr[:, :, 3]
+
+    # Buat binary mask: True = transparan
+    transparent = alpha < 10
+
+    # ── Connected Components via labeling sederhana ──────────────────────────
+    # Gunakan scipy jika ada, fallback ke implementasi manual
+    try:
+        from scipy import ndimage
+        labeled, num_features = ndimage.label(transparent)
+    except ImportError:
+        labeled, num_features = _simple_label(transparent)
+
+    MIN_AREA = (w * h) * 0.005  # minimal 0.5% dari total area
+    MAX_AREA = (w * h) * 0.95   # maksimal 95% (jangan ambil seluruh gambar)
+
+    regions = []
+    for label_id in range(1, num_features + 1):
+        mask = labeled == label_id
+        area = mask.sum()
+        if area < MIN_AREA or area > MAX_AREA:
+            continue
+
+        # Bounding box
+        rows = np.where(mask.any(axis=1))[0]
+        cols = np.where(mask.any(axis=0))[0]
+        y1, y2 = int(rows[0]), int(rows[-1])
+        x1, x2 = int(cols[0]), int(cols[-1])
+        bw = x2 - x1 + 1
+        bh = y2 - y1 + 1
+
+        # Deteksi apakah slot lingkaran:
+        # Rasio area transparan vs bounding box mendekati π/4 ≈ 0.785
+        fill_ratio = area / (bw * bh)
+        is_round = 0.65 < fill_ratio < 0.90 and abs(bw - bh) < min(bw, bh) * 0.2
+
+        regions.append({
+            'x': x1, 'y': y1, 'w': bw, 'h': bh,
+            'cx': x1 + bw//2,   # center x (untuk sorting)
+            'cy': y1 + bh//2,   # center y
+            'area': int(area),
+            'shape': 'round' if is_round else 'rect',
+            'round_radius': 0,
+        })
+
+    if not regions:
+        return []
+
+    # ── Sorting ────────────────────────────────────────────────────────────────
+    if sort_order == 'top_bottom_col':
+        # Kelompokkan ke kolom berdasarkan center-x (toleransi 15% lebar gambar)
+        col_tol = w * 0.15
+        regions_sorted = sorted(regions, key=lambda r: r['cx'])
+        columns = []
+        for r in regions_sorted:
+            placed = False
+            for col in columns:
+                if abs(r['cx'] - col[0]['cx']) < col_tol:
+                    col.append(r)
+                    placed = True
+                    break
+            if not placed:
+                columns.append([r])
+
+        # Urutkan tiap kolom dari atas ke bawah
+        for col in columns:
+            col.sort(key=lambda r: r['cy'])
+
+        # Flatten: kolom kiri dulu
+        columns.sort(key=lambda col: col[0]['cx'])
+        ordered = [r for col in columns for r in col]
+
+    else:
+        # Reading order: atas ke bawah, kiri ke kanan
+        ordered = sorted(regions, key=lambda r: (r['cy'], r['cx']))
+
+    # ── Assign ID ─────────────────────────────────────────────────────────────
+    slots = []
+    for i, r in enumerate(ordered):
+        slots.append({
+            'id':           i + 1,
+            'x':            r['x'],
+            'y':            r['y'],
+            'w':            r['w'],
+            'h':            r['h'],
+            'shape':        r['shape'],
+            'round_radius': 0,
+        })
+
+    print(f"  ✅ Terdeteksi {len(slots)} slot dari PNG")
+    for s in slots:
+        print(f"     Slot {s['id']}: x={s['x']} y={s['y']} w={s['w']} h={s['h']} shape={s['shape']}")
+
+    return slots
+
+
+def _simple_label(binary_mask):
+    """
+    Fallback connected-component labeling tanpa scipy.
+    Menggunakan BFS flood fill.
+    """
+    import collections
+    h, w = binary_mask.shape
+    labeled = [[0]*w for _ in range(h)]
+    label_id = 0
+
+    def bfs(sr, sc, lid):
+        q = collections.deque([(sr, sc)])
+        labeled[sr][sc] = lid
+        while q:
+            r, c = q.popleft()
+            for dr, dc in [(-1,0),(1,0),(0,-1),(0,1)]:
+                nr, nc = r+dr, c+dc
+                if 0<=nr<h and 0<=nc<w and binary_mask[nr][nc] and labeled[nr][nc]==0:
+                    labeled[nr][nc] = lid
+                    q.append((nr, nc))
+
+    for r in range(h):
+        for c in range(w):
+            if binary_mask[r][c] and labeled[r][c] == 0:
+                label_id += 1
+                bfs(r, c, label_id)
+
+    import numpy as np
+    return np.array(labeled), label_id
+
+
+def auto_generate_json_from_png(png_path: str, template_id: str = None,
+                                 name: str = None) -> dict:
+    """
+    Buat JSON template otomatis dari PNG Canva.
+    Dipanggil dari API endpoint /api/templates/scan-png
+    """
+    import json as _json
+
+    img = Image.open(png_path)
+    cw, ch = img.size
+
+    tid  = template_id or Path(png_path).stem
+    tname = name or tid.replace('_', ' ').title()
+
+    slots = detect_slots_from_png(png_path, sort_order='top_bottom_col')
+
+    config = {
+        'id':               tid,
+        'name':             tname,
+        'description':      f'Template dengan {len(slots)} foto',
+        'photo_count':      len(slots),
+        'canvas_size':      [cw, ch],
+        'background_image': Path(png_path).name,
+        'background_color': '#ffffff',
+        'slots':            slots,
+    }
+
+    # Simpan JSON otomatis
+    json_path = ASSETS_TEMPLATES_DIR / f"{tid}.json"
+    with open(json_path, 'w', encoding='utf-8') as f:
+        _json.dump(config, f, indent=2, ensure_ascii=False)
+
+    print(f"✅ JSON disimpan: {json_path}")
+    return config
+
+
+def apply_template(session_id: str, template_id: str, photo_paths: list) -> str:
+    """
+    Gabungkan foto ke dalam template.
+    Alur:
+      1. Buka background PNG dari Canva (jika ada) ATAU buat canvas warna solid
+      2. Paste foto ke setiap slot (crop center, support rect/round/rounded-rect)
+      3. Overlay kembali background PNG di atas foto (agar border/dekorasi Canva menutupi)
+      4. Tambah branding tanggal
+      5. Simpan hasil
+    """
+    templates = load_templates_from_disk()
+    config = templates.get(template_id)
+    if not config:
+        raise ValueError(f"Template tidak ditemukan: {template_id}")
+
+    cw, ch   = config['canvas_size']
+    bg_color = _hex_to_rgb(config.get('background_color', '#ffffff'))
+    slots    = config.get('photo_slots', [])
+    required = config.get('photo_count', len(slots))
+
+    # ── 1. Buat canvas dengan background ──────────────────────────────────────
+    canvas = Image.new('RGBA', (cw, ch), bg_color + (255,))
+
+    # Load background PNG dari Canva (layer bawah — warna dasar)
+    bg_img_name = config.get('background_image', '')
+    bg_path = ASSETS_TEMPLATES_DIR / bg_img_name if bg_img_name else None
+
+    bg_layer = None
+    if bg_path and bg_path.exists():
+        try:
+            bg_layer = Image.open(bg_path).convert('RGBA').resize((cw, ch), Image.LANCZOS)
+            # Paste background sebagai layer bawah
+            canvas.alpha_composite(bg_layer)
+        except Exception as e:
+            print(f"⚠️  Gagal load background image: {e}")
+
+    # ── 2. Paste foto ke slot ──────────────────────────────────────────────────
+    # Layer foto ditaruh DI BAWAH overlay PNG — sehingga border/dekorasi Canva
+    # tetap terlihat menutupi tepi foto
+    photo_layer = Image.new('RGBA', (cw, ch), (0, 0, 0, 0))
+
+    for i, slot in enumerate(slots[:required]):
+        if i >= len(photo_paths):
+            break
+        try:
+            photo = Image.open(photo_paths[i]).convert('RGB')
+            photo = _center_crop(photo, slot['w'], slot['h'])
+
+            if config.get('grayscale'):
+                photo = photo.convert('L').convert('RGB')
+
+            shape  = slot.get('shape', 'rect')
+            radius = slot.get('round_radius', 0)
+
+            if shape == 'round':
+                _paste_round(photo_layer, photo, slot)
+            elif radius > 0:
+                _paste_rounded_rect(photo_layer, photo, slot, radius)
+            else:
+                photo_layer.paste(photo.convert('RGBA'), (slot['x'], slot['y']))
+
+        except Exception as e:
+            print(f"  ⚠️  Slot {i+1} error: {e}")
+            _paste_placeholder_rgba(photo_layer, slot, i+1)
+
+    # Composite: background dulu, lalu foto
+    # Urutkan: bg_color → bg_png (bawah) → foto → bg_png overlay (atas)
+    base = Image.new('RGBA', (cw, ch), bg_color + (255,))
+    if bg_layer:
+        base.alpha_composite(bg_layer)
+
+    # Foto ditempel di atas background
+    base.alpha_composite(photo_layer)
+
+    # Overlay PNG lagi di atas foto agar border/teks/dekorasi Canva menutupi foto
+    if bg_layer:
+        base.alpha_composite(bg_layer)
+
+    # ── 3. Branding ───────────────────────────────────────────────────────────
+    final = base.convert('RGB')
+    draw  = ImageDraw.Draw(final)
+    _add_branding(draw, (cw, ch), config)
+
+    # ── 4. Simpan ─────────────────────────────────────────────────────────────
+    output_path = str(SESSIONS_DIR / session_id / f"result_{template_id}.jpg")
+    final.save(output_path, 'JPEG', quality=95)
+    print(f"✅ Hasil disimpan: {output_path}")
+    return output_path
+
+
+def generate_thumbnail(template_id: str, config: dict) -> str:
+    """
+    Buat thumbnail preview template (200×280px) untuk ditampilkan di UI.
+    Jika background PNG ada → pakai sebagai thumbnail.
+    Jika tidak → gambar slot placeholder.
+    """
+    thumb_path = ASSETS_THUMBS_DIR / f"{template_id}.jpg"
+
+    # Gunakan background PNG jika ada
+    bg_img_name = config.get('background_image', '')
+    bg_path = ASSETS_TEMPLATES_DIR / bg_img_name if bg_img_name else None
+
+    cw, ch = config.get('canvas_size', [600, 800])
+
+    if bg_path and bg_path.exists():
+        try:
+            img = Image.open(bg_path).convert('RGB')
+            img.thumbnail((240, 320), Image.LANCZOS)
+            img.save(str(thumb_path), 'JPEG', quality=85)
+            return str(thumb_path)
+        except Exception as e:
+            print(f"  Thumbnail dari PNG gagal: {e}")
+
+    # Fallback: gambar placeholder
+    TW, TH = 240, 320
+    bg_color = _hex_to_rgb(config.get('background_color', '#ffffff'))
+    thumb = Image.new('RGB', (TW, TH), bg_color)
+    draw  = ImageDraw.Draw(thumb)
+
+    scale  = min((TW-16)/cw, (TH-16)/ch)
+    ox     = (TW - cw*scale) / 2
+    oy     = (TH - ch*scale) / 2
+
+    slot_color = (180, 180, 190) if bg_color[0] > 128 else (60, 60, 80)
+
+    for i, slot in enumerate(config.get('photo_slots', [])):
+        x = int(ox + slot['x']*scale)
+        y = int(oy + slot['y']*scale)
+        w = max(4, int(slot['w']*scale))
+        h = max(4, int(slot['h']*scale))
+
+        if slot.get('shape') == 'round':
+            draw.ellipse([x, y, x+w, y+h], fill=slot_color)
+        else:
+            r = int(slot.get('round_radius', 0) * scale)
+            if r > 0:
+                draw.rounded_rectangle([x, y, x+w, y+h], radius=r, fill=slot_color)
+            else:
+                draw.rectangle([x, y, x+w, y+h], fill=slot_color)
+
+        # Nomor
+        draw.text((x+w//2, y+h//2), str(i+1),
+                  fill=(255,255,255,160) if bg_color[0]<128 else (0,0,0,100),
+                  anchor='mm')
+
+    thumb.save(str(thumb_path), 'JPEG', quality=85)
+    return str(thumb_path)
+
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+def _hex_to_rgb(hex_color: str) -> tuple:
+    h = hex_color.lstrip('#')
+    if len(h) == 3:
+        h = ''.join(c*2 for c in h)
+    try:
+        return tuple(int(h[i:i+2], 16) for i in (0, 2, 4))
+    except:
+        return (255, 255, 255)
+
+
+def _center_crop(img: Image.Image, tw: int, th: int) -> Image.Image:
+    sw, sh = img.size
+    sr, tr = sw/sh, tw/th
+    if sr > tr:
+        nw = int(sh * tr)
+        img = img.crop(((sw-nw)//2, 0, (sw-nw)//2+nw, sh))
+    elif sr < tr:
+        nh = int(sw / tr)
+        img = img.crop((0, (sh-nh)//2, sw, (sh-nh)//2+nh))
+    return img.resize((tw, th), Image.LANCZOS)
+
+
+def _paste_round(canvas: Image.Image, photo: Image.Image, slot: dict):
+    mask = Image.new('L', (slot['w'], slot['h']), 0)
+    ImageDraw.Draw(mask).ellipse([0, 0, slot['w']-1, slot['h']-1], fill=255)
+    photo_rgba = photo.convert('RGBA')
+    photo_rgba.putalpha(mask)
+    canvas.alpha_composite(photo_rgba, (slot['x'], slot['y']))
+
+
+def _paste_rounded_rect(canvas: Image.Image, photo: Image.Image, slot: dict, radius: int):
+    mask = Image.new('L', (slot['w'], slot['h']), 0)
+    ImageDraw.Draw(mask).rounded_rectangle(
+        [0, 0, slot['w']-1, slot['h']-1], radius=radius, fill=255
+    )
+    photo_rgba = photo.convert('RGBA')
+    photo_rgba.putalpha(mask)
+    canvas.alpha_composite(photo_rgba, (slot['x'], slot['y']))
+
+
+def _paste_placeholder_rgba(canvas: Image.Image, slot: dict, num: int):
+    colors = [(180,60,60),(60,100,180),(60,160,80),(180,140,40),(140,60,180),(80,160,160)]
+    c = colors[(num-1) % len(colors)] + (200,)
+    ph = Image.new('RGBA', (slot['w'], slot['h']), c)
+    canvas.alpha_composite(ph, (slot['x'], slot['y']))
+
+
+def _add_branding(draw, size, config):
+    text  = f"PhotoBox Studio  •  {datetime.now().strftime('%d %b %Y')}"
+    try:
+        font = ImageFont.truetype(str(FONTS_DIR / 'Quicksand-Bold.ttf'), 24)
+    except:
+        font = ImageFont.load_default()
+    bg   = _hex_to_rgb(config.get('background_color', '#ffffff'))
+    dark = (bg[0]*0.299 + bg[1]*0.587 + bg[2]*0.114) > 128
+    color = (120,120,120) if dark else (180,180,180)
+    try:
+        bb = draw.textbbox((0,0), text, font=font)
+        tw = bb[2]-bb[0]
+    except:
+        tw = len(text)*12
+    draw.text(((size[0]-tw)//2, size[1]-38), text, font=font, fill=color)
+
+
+# ─── Google Drive Integration ────────────────────────────────────────────────
+
+def get_drive_service():
+    """Autentikasi dan kembalikan Google Drive service"""
+    creds = None
+    token_path = BASE_DIR / 'token.pickle'
+    creds_path = BASE_DIR / 'credentials.json'
+
+    if token_path.exists():
+        with open(token_path, 'rb') as f:
+            creds = pickle.load(f)
+
+    if not creds or not creds.valid:
+        if creds and creds.expired and creds.refresh_token:
+            creds.refresh(Request())
+        else:
+            if not creds_path.exists():
+                return None, "credentials.json tidak ditemukan. Silakan setup Google API."
+            flow = InstalledAppFlow.from_client_secrets_file(str(creds_path), SCOPES)
+            creds = flow.run_local_server(port=0)
+        with open(token_path, 'wb') as f:
+            pickle.dump(creds, f)
+
+    service = build('drive', 'v3', credentials=creds)
+    return service, None
+
+
+def get_or_create_folder(service, folder_name):
+    """Buat atau ambil folder di Google Drive"""
+    query = f"name='{folder_name}' and mimeType='application/vnd.google-apps.folder' and trashed=false"
+    results = service.files().list(q=query, fields='files(id, name)').execute()
+    files = results.get('files', [])
+
+    if files:
+        return files[0]['id']
+
+    folder_metadata = {
+        'name': folder_name,
+        'mimeType': 'application/vnd.google-apps.folder'
+    }
+    folder = service.files().create(body=folder_metadata, fields='id').execute()
+    return folder['id']
+
+
+def upload_to_drive(file_path: str, session_id: str) -> dict:
+    """Upload hasil foto ke Google Drive dan kembalikan shareable link"""
+    service, error = get_drive_service()
+    if error:
+        return {"success": False, "error": error}
+
+    try:
+        folder_id = get_or_create_folder(service, GOOGLE_DRIVE_FOLDER)
+
+        file_name = f"PhotoBox_{session_id}_{datetime.now().strftime('%H%M%S')}.jpg"
+        file_metadata = {
+            'name': file_name,
+            'parents': [folder_id]
+        }
+
+        media = MediaFileUpload(file_path, mimetype='image/jpeg', resumable=True)
+        file = service.files().create(
+            body=file_metadata,
+            media_body=media,
+            fields='id, webViewLink, webContentLink'
+        ).execute()
+
+        # Set public permission
+        service.permissions().create(
+            fileId=file['id'],
+            body={'type': 'anyone', 'role': 'reader'}
+        ).execute()
+
+        share_url = file.get('webContentLink', file.get('webViewLink'))
+        return {
+            "success": True,
+            "file_id": file['id'],
+            "share_url": share_url,
+            "view_url": file.get('webViewLink')
+        }
+
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+def generate_qr_code(url: str, output_path: str) -> str:
+    """Generate QR code dari URL Google Drive"""
+    qr = qrcode.QRCode(
+        version=1,
+        error_correction=qrcode.constants.ERROR_CORRECT_H,
+        box_size=10,
+        border=4,
+    )
+    qr.add_data(url)
+    qr.make(fit=True)
+
+    img = qr.make_image(fill_color="#1a1a2e", back_color="white")
+    img.save(output_path)
+    return output_path
+
+
+# ─── Session Management ──────────────────────────────────────────────────────
+
+def create_session() -> str:
+    session_id = datetime.now().strftime('%Y%m%d_%H%M%S')
+    session_dir = SESSIONS_DIR / session_id
+    session_dir.mkdir(exist_ok=True)
+    (session_dir / 'photos').mkdir(exist_ok=True)
+
+    session_data = {
+        "id": session_id,
+        "created_at": datetime.now().isoformat(),
+        "photos": [],
+        "template": None,
+        "result_path": None,
+        "drive_url": None,
+        "status": "capturing"
+    }
+
+    with open(session_dir / 'session.json', 'w') as f:
+        json.dump(session_data, f, indent=2)
+
+    return session_id
+
+
+def load_session(session_id: str) -> dict:
+    path = SESSIONS_DIR / session_id / 'session.json'
+    if path.exists():
+        with open(path) as f:
+            return json.load(f)
+    return None
+
+
+def save_session(session_data: dict):
+    path = SESSIONS_DIR / session_data['id'] / 'session.json'
+    with open(path, 'w') as f:
+        json.dump(session_data, f, indent=2)
+
+
+# ─── API Routes ───────────────────────────────────────────────────────────────
+
+@app.route('/')
+def index():
+    return send_from_directory('frontend', 'index.html')
+
+
+# Cache status kamera agar tidak spam DCC setiap request
+_cam_status_cache = {"connected": False, "checked_at": 0}
+CAM_CACHE_TTL = 15  # detik
+
+
+@app.route('/api/status')
+def api_status():
+    """
+    Cek status server dan kamera.
+    Gunakan cache 15 detik agar tidak spam DCC dengan HTTP request.
+    """
+    global _cam_status_cache
+    now = time.time()
+
+    # Pakai cache jika masih fresh
+    if now - _cam_status_cache["checked_at"] < CAM_CACHE_TTL:
+        cam = _cam_status_cache["connected"]
+    else:
+        cam = check_camera()
+        _cam_status_cache = {"connected": cam, "checked_at": now}
+
+    return jsonify({
+        "camera_connected": cam,
+        "camera_model":     "Canon EOS 700D" if cam else None,
+        "server":           "running",
+        "version":          "1.0.0"
+    })
+
+
+@app.route('/api/camera/preview/start', methods=['POST'])
+def api_preview_start():
+    start_live_preview()
+    return jsonify({"status": "preview started"})
+
+
+@app.route('/api/camera/preview/stop', methods=['POST'])
+def api_preview_stop():
+    stop_live_preview()
+    return jsonify({"status": "preview stopped"})
+
+
+@app.route('/api/session/start', methods=['POST'])
+def api_session_start():
+    global current_session
+    session_id = create_session()
+    current_session = load_session(session_id)
+    return jsonify({"session_id": session_id, "status": "started"})
+
+
+@app.route('/api/session/<session_id>/capture', methods=['POST'])
+def api_capture(session_id):
+    """Ambil 1 foto, dipanggil 4x per sesi"""
+    session = load_session(session_id)
+    if not session:
+        return jsonify({"error": "Session tidak ditemukan"}), 404
+
+    photo_index = len(session['photos']) + 1
+    photo_path = str(SESSIONS_DIR / session_id / 'photos' / f'photo_{photo_index}.jpg')
+
+    # Coba capture dari kamera, fallback ke demo mode
+    if check_camera():
+        success = capture_photo(photo_path)
+    else:
+        # Demo mode: buat placeholder berwarna
+        success = _create_demo_photo(photo_path, photo_index)
+
+    if success:
+        session['photos'].append(photo_path)
+        save_session(session)
+
+        # Kirim thumbnail ke frontend
+        with open(photo_path, 'rb') as f:
+            img_data = base64.b64encode(f.read()).decode()
+
+        return jsonify({
+            "success": True,
+            "photo_index": photo_index,
+            "total": len(session['photos']),
+            "thumbnail": f"data:image/jpeg;base64,{img_data}"
+        })
+
+    return jsonify({"success": False, "error": "Gagal mengambil foto"}), 500
+
+
+def _create_demo_photo(path: str, index: int) -> bool:
+    """Buat foto demo saat kamera tidak tersambung"""
+    colors = [(220, 60, 80), (60, 120, 220), (80, 180, 80), (200, 140, 40)]
+    img = Image.new('RGB', (1200, 900), colors[index - 1])
+    draw = ImageDraw.Draw(img)
+    try:
+        font = ImageFont.truetype(str(FONTS_DIR / 'Quicksand-Bold.ttf'), 120)
+    except:
+        font = ImageFont.load_default()
+    draw.text((450, 350), f"#{index}", fill=(255, 255, 255), font=font)
+    draw.text((350, 500), "Demo Mode", fill=(255, 255, 255, 180), font=font)
+    img.save(path, 'JPEG', quality=90)
+    return True
+
+
+@app.route('/api/session/<session_id>/apply-template', methods=['POST'])
+def api_apply_template(session_id):
+    """Terapkan template dan buat foto gabungan"""
+    session = load_session(session_id)
+    if not session:
+        return jsonify({"error": "Session tidak ditemukan"}), 404
+
+    data = request.json
+    template_id = data.get('template_id', 'classic_strip')
+
+    # Jumlah foto sesuai photo_count dari JSON template
+    templates_dict = load_templates_from_disk()
+    tpl_config = templates_dict.get(template_id, {})
+    required = tpl_config.get("photo_count", len(tpl_config.get("photo_slots", [])) or 4)
+    if len(session["photos"]) < required:
+        return jsonify({"error": f"Template ini butuh {required} foto, baru ada {len(session['photos'])}"}), 400
+
+    try:
+        result_path = apply_template(session_id, template_id, session['photos'][:required])
+        session['template'] = template_id
+        session['result_path'] = result_path
+        session['status'] = 'template_applied'
+        save_session(session)
+
+        with open(result_path, 'rb') as f:
+            img_data = base64.b64encode(f.read()).decode()
+
+        return jsonify({
+            "success": True,
+            "result_image": f"data:image/jpeg;base64,{img_data}",
+            "result_path": result_path
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/session/<session_id>/upload-drive', methods=['POST'])
+def api_upload_drive(session_id):
+    """Upload hasil ke Google Drive dan buat QR Code"""
+    session = load_session(session_id)
+    if not session or not session.get('result_path'):
+        return jsonify({"error": "Belum ada hasil foto"}), 400
+
+    result = upload_to_drive(session['result_path'], session_id)
+
+    if result['success']:
+        # Buat QR Code
+        qr_path = str(SESSIONS_DIR / session_id / 'qrcode.png')
+        generate_qr_code(result['share_url'], qr_path)
+
+        session['drive_url'] = result['share_url']
+        session['status'] = 'uploaded'
+        save_session(session)
+
+        with open(qr_path, 'rb') as f:
+            qr_data = base64.b64encode(f.read()).decode()
+
+        return jsonify({
+            "success": True,
+            "drive_url": result['share_url'],
+            "qr_code": f"data:image/png;base64,{qr_data}"
+        })
+
+    return jsonify({"success": False, "error": result.get('error')}), 500
+
+
+@app.route('/api/session/<session_id>/print', methods=['POST'])
+def api_print(session_id):
+    """Print hasil foto ke printer default"""
+    session = load_session(session_id)
+    if not session or not session.get('result_path'):
+        return jsonify({"error": "Belum ada hasil foto"}), 400
+
+    try:
+        # Linux: lp command
+        result = subprocess.run(
+            ['lp', '-o', 'fit-to-page', session['result_path']],
+            capture_output=True, timeout=10
+        )
+        if result.returncode == 0:
+            return jsonify({"success": True, "message": "Sedang dicetak..."})
+        # Windows fallback
+        os.startfile(session['result_path'], 'print')
+        return jsonify({"success": True, "message": "Sedang dicetak..."})
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)})
+
+
+@app.route('/api/templates')
+def api_templates():
+    """
+    Baca template dari assets/templates/*.json dan kembalikan ke frontend.
+    Otomatis generate thumbnail jika belum ada.
+    """
+    templates_dict = load_templates_from_disk()
+    result = []
+    for tid, cfg in templates_dict.items():
+        slots = cfg.get('photo_slots', [])
+        shapes = list(set(s.get('shape','rect') for s in slots))
+
+        # Generate thumbnail jika belum ada
+        thumb_path = ASSETS_THUMBS_DIR / f"{tid}.jpg"
+        if not thumb_path.exists():
+            try:
+                generate_thumbnail(tid, cfg)
+            except Exception as e:
+                print(f"  Thumbnail {tid} gagal: {e}")
+
+        result.append({
+            "id":               tid,
+            "name":             cfg.get("name", tid),
+            "description":      cfg.get("description", ""),
+            "photo_count":      cfg.get("photo_count", len(slots)),
+            "canvas_size":      list(cfg.get("canvas_size", [600, 800])),
+            "photo_slots":      slots,
+            "has_bg_image":     bool(cfg.get("background_image")),
+            "thumbnail_url":    f"/api/templates/{tid}/thumbnail",
+            "shapes":           shapes,
+        })
+    return jsonify(result)
+
+
+@app.route('/assets/templates/<filename>')
+def serve_template_asset(filename):
+    """Serve file PNG template langsung ke frontend."""
+    return send_from_directory(str(ASSETS_TEMPLATES_DIR), filename)
+
+
+@app.route('/api/templates/<template_id>/thumbnail')
+def api_template_thumbnail(template_id):
+    """Serve thumbnail template."""
+    thumb_path = ASSETS_THUMBS_DIR / f"{template_id}.jpg"
+
+    # Generate jika belum ada
+    if not thumb_path.exists():
+        templates = load_templates_from_disk()
+        cfg = templates.get(template_id)
+        if cfg:
+            try:
+                generate_thumbnail(template_id, cfg)
+            except Exception:
+                pass
+
+    if thumb_path.exists():
+        return send_file(str(thumb_path), mimetype='image/jpeg')
+
+    # 1x1 pixel placeholder jika gagal
+    from io import BytesIO
+    img = Image.new('RGB', (1,1), (30,30,40))
+    buf = BytesIO()
+    img.save(buf, 'JPEG')
+    buf.seek(0)
+    return send_file(buf, mimetype='image/jpeg')
+
+
+@app.route('/api/templates/scan-png', methods=['POST'])
+def api_scan_png():
+    """
+    Upload PNG dan otomatis deteksi slot transparan.
+    Menyimpan JSON dan PNG ke assets/templates/.
+    Request: multipart/form-data dengan field 'file' dan opsional 'id', 'name'
+    """
+    if 'file' not in request.files:
+        return jsonify({"error": "Tidak ada file yang diupload"}), 400
+
+    file = request.files['file']
+    if not file.filename:
+        return jsonify({"error": "Nama file kosong"}), 400
+
+    template_id   = request.form.get('id', '').strip()
+    template_name = request.form.get('name', '').strip()
+
+    # Sanitize filename
+    from werkzeug.utils import secure_filename
+    filename = secure_filename(file.filename)
+    if not template_id:
+        template_id = Path(filename).stem.lower().replace('-', '_').replace(' ', '_')
+
+    # Simpan PNG ke assets/templates/
+    png_save_path = ASSETS_TEMPLATES_DIR / f"{template_id}.png"
+    file.save(str(png_save_path))
+    print(f"📥 PNG disimpan: {png_save_path}")
+
+    try:
+        config = auto_generate_json_from_png(
+            str(png_save_path),
+            template_id=template_id,
+            name=template_name or template_id.replace('_', ' ').title()
+        )
+
+        # Generate thumbnail
+        try:
+            generate_thumbnail(template_id, config)
+        except Exception as e:
+            print(f"  Thumbnail gagal: {e}")
+
+        return jsonify({
+            "success":      True,
+            "template_id":  template_id,
+            "photo_count":  config.get('photo_count', 0),
+            "slots":        config.get('slots', []),
+            "canvas_size":  config.get('canvas_size', []),
+            "message":      f"Berhasil mendeteksi {config.get('photo_count',0)} slot foto"
+        })
+
+    except Exception as e:
+        # Hapus PNG jika gagal
+        if png_save_path.exists():
+            png_save_path.unlink()
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route('/api/templates/<template_id>/regenerate', methods=['POST'])
+def api_regenerate_template(template_id):
+    """
+    Re-scan PNG untuk template yang sudah ada — berguna jika PNG diupdate.
+    Menghapus JSON lama dan generate ulang dari PNG.
+    """
+    png_path = ASSETS_TEMPLATES_DIR / f"{template_id}.png"
+    if not png_path.exists():
+        return jsonify({"error": f"PNG tidak ditemukan: {template_id}.png"}), 404
+
+    # Hapus JSON lama
+    json_path = ASSETS_TEMPLATES_DIR / f"{template_id}.json"
+    if json_path.exists():
+        json_path.unlink()
+
+    # Hapus thumbnail lama
+    thumb_path = ASSETS_THUMBS_DIR / f"{template_id}.jpg"
+    if thumb_path.exists():
+        thumb_path.unlink()
+
+    try:
+        config = auto_generate_json_from_png(str(png_path), template_id=template_id)
+        generate_thumbnail(template_id, config)
+        return jsonify({
+            "success":     True,
+            "photo_count": config.get('photo_count', 0),
+            "slots":       config.get('slots', []),
+        })
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route('/api/drive/status')
+def api_drive_status():
+    """Cek status koneksi Google Drive"""
+    token_path = BASE_DIR / 'token.pickle'
+    creds_path = BASE_DIR / 'credentials.json'
+    return jsonify({
+        "credentials_exists": creds_path.exists(),
+        "token_exists": token_path.exists(),
+        "ready": creds_path.exists() and token_path.exists()
+    })
+
+
+# ─── WebSocket Events ─────────────────────────────────────────────────────────
+
+@socketio.on('connect')
+def on_connect():
+    emit('connected', {'status': 'WebSocket terhubung'})
+
+
+@socketio.on('start_preview')
+def on_start_preview():
+    start_live_preview()
+
+
+@socketio.on('stop_preview')
+def on_stop_preview():
+    stop_live_preview()
+
+
+# ─── Main ─────────────────────────────────────────────────────────────────────
+
+if __name__ == '__main__':
+    print("=" * 60)
+    print("  📸 PhotoBox Server - Canon 700D Integration")
+    print("  Buka browser: http://localhost:5000")
+    print("=" * 60)
+    socketio.run(app, host='0.0.0.0', port=5000, debug=False)

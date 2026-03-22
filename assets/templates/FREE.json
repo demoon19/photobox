@@ -1,0 +1,50 @@
+{
+  "id": "FREE",
+  "name": "Free",
+  "description": "Template dengan 4 foto",
+  "photo_count": 4,
+  "canvas_size": [
+    707,
+    2000
+  ],
+  "background_image": "FREE.png",
+  "background_color": "#ffffff",
+  "slots": [
+    {
+      "id": 1,
+      "x": 73,
+      "y": 137,
+      "w": 634,
+      "h": 364,
+      "shape": "rect",
+      "round_radius": 0
+    },
+    {
+      "id": 2,
+      "x": 34,
+      "y": 528,
+      "w": 639,
+      "h": 364,
+      "shape": "rect",
+      "round_radius": 0
+    },
+    {
+      "id": 3,
+      "x": 34,
+      "y": 909,
+      "w": 639,
+      "h": 364,
+      "shape": "rect",
+      "round_radius": 0
+    },
+    {
+      "id": 4,
+      "x": 34,
+      "y": 1290,
+      "w": 637,
+      "h": 364,
+      "shape": "rect",
+      "round_radius": 0
+    }
+  ]
+}

@@ -1,0 +1,792 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+  <meta charset="UTF-8"/><meta name="viewport" content="width=device-width,initial-scale=1.0"/>
+  <title>PhotoBox Studio</title>
+  <link href="https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@0,700;1,400&family=DM+Sans:wght@300;400;500;600&display=swap" rel="stylesheet"/>
+  <style>
+    :root{--bg:#0a0a0f;--surface:#13131a;--card:#1a1a24;--border:#26263a;--accent:#e8c97a;--accent2:#a78bfa;--text:#ededf0;--muted:#6b6b80;--success:#4ade80;--danger:#f87171;--r:14px}
+    *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+    body{font-family:'DM Sans',sans-serif;background:var(--bg);color:var(--text);min-height:100vh;overflow-x:hidden}
+
+    /* ── Header ── */
+    header{display:flex;align-items:center;justify-content:space-between;padding:16px 32px;
+      border-bottom:1px solid var(--border);background:rgba(10,10,15,.92);
+      backdrop-filter:blur(16px);position:sticky;top:0;z-index:100}
+    .logo{font-family:'Playfair Display',serif;font-size:1.4rem}
+    .logo em{color:var(--accent);font-style:italic}
+    .pills{display:flex;gap:8px}
+    .pill{display:flex;align-items:center;gap:6px;padding:5px 12px;border-radius:999px;
+      font-size:.74rem;font-weight:500;background:var(--card);border:1px solid var(--border)}
+    .pill .dot{width:6px;height:6px;border-radius:50%;background:var(--muted)}
+    .pill.ok .dot{background:var(--success);box-shadow:0 0 6px var(--success)}
+    .pill.err .dot{background:var(--danger)}
+
+    /* ── Steps ── */
+    .steps{display:flex;margin:22px 32px 0;background:var(--card);
+      border-radius:var(--r);border:1px solid var(--border);overflow:hidden}
+    .step{flex:1;padding:11px 14px;text-align:center;font-size:.78rem;color:var(--muted);
+      border-right:1px solid var(--border);transition:all .3s}
+    .step:last-child{border-right:none}
+    .step .n{display:inline-flex;align-items:center;justify-content:center;
+      width:19px;height:19px;border-radius:50%;background:var(--border);
+      color:var(--muted);font-size:.68rem;font-weight:700;margin-right:6px}
+    .step.active{background:var(--surface);color:var(--accent)}
+    .step.active .n{background:var(--accent);color:var(--bg)}
+    .step.done{color:var(--success)}
+    .step.done .n{background:var(--success);color:var(--bg)}
+
+    main{padding:24px 32px 40px}
+    .panel{display:none;animation:up .35s ease}
+    .panel.active{display:block}
+    @keyframes up{from{opacity:0;transform:translateY(16px)}to{opacity:1;transform:translateY(0)}}
+
+    /* ══════════════════════════════════════
+       PANEL 1 — PILIH TEMPLATE
+       Layout: scroll horizontal, kartu besar dengan preview visual penuh
+    ══════════════════════════════════════ */
+    .tpl-page-title{margin-bottom:20px}
+    .tpl-page-title h2{font-family:'Playfair Display',serif;font-size:1.7rem;margin-bottom:4px}
+    .tpl-page-title p{color:var(--muted);font-size:.85rem}
+
+    /* ── Grid template — 3 kolom, scroll vertikal penuh ── */
+    .tpl-carousel{
+      display:grid;
+      grid-template-columns:repeat(3,1fr);
+      gap:20px;
+      padding:4px 2px 16px;
+      scrollbar-width:thin;
+      scrollbar-color:var(--border) transparent;
+    }
+    @media(max-width:700px){.tpl-carousel{grid-template-columns:repeat(2,1fr);gap:12px}}
+    @media(min-width:1400px){.tpl-carousel{grid-template-columns:repeat(4,1fr)}}
+    .tpl-carousel::-webkit-scrollbar{width:4px}
+    .tpl-carousel::-webkit-scrollbar-track{background:transparent}
+    .tpl-carousel::-webkit-scrollbar-thumb{background:var(--border);border-radius:999px}
+
+    /* Kartu template */
+    .tpl-card{
+      width:100%;
+      background:var(--card);
+      border:2px solid var(--border);
+      border-radius:16px;
+      overflow:hidden;
+      cursor:pointer;
+      transition:all .25s;
+      position:relative;
+      display:flex;
+      flex-direction:column;
+    }
+    .tpl-card:hover{
+      border-color:rgba(232,201,122,.5);
+      transform:translateY(-4px);
+      box-shadow:0 16px 48px rgba(0,0,0,.55);
+    }
+    .tpl-card.sel{
+      border-color:var(--accent);
+      box-shadow:0 0 0 3px rgba(232,201,122,.25),0 16px 48px rgba(0,0,0,.55);
+      transform:translateY(-4px);
+    }
+
+    /* Area preview — tampilkan full gambar template tanpa crop */
+    .tpl-visual{
+      width:100%;
+      position:relative;
+      background:var(--surface);
+      display:flex;
+      align-items:center;
+      justify-content:center;
+      padding:12px;
+      /* Tinggi menyesuaikan rasio gambar secara otomatis */
+    }
+    /* Gambar template tampil full, tidak di-crop */
+    .tpl-visual img.tpl-img{
+      width:100%;
+      height:auto;
+      display:block;
+      border-radius:8px;
+      object-fit:contain;
+      box-shadow:0 4px 20px rgba(0,0,0,.4);
+    }
+    /* Canvas fallback juga full width */
+    .tpl-visual canvas.tpl-cv{
+      width:100%!important;
+      height:auto!important;
+      display:block;
+      border-radius:8px;
+      box-shadow:0 4px 20px rgba(0,0,0,.4);
+    }
+
+    /* Info di bawah gambar (bukan overlay) */
+    .tpl-info{
+      padding:12px 14px 14px;
+      display:flex;
+      flex-direction:column;
+      gap:4px;
+      border-top:1px solid var(--border);
+    }
+    .tpl-info-row{
+      display:flex;
+      align-items:center;
+      justify-content:space-between;
+      gap:8px;
+    }
+    .tpl-overlay-name{
+      font-family:'Playfair Display',serif;
+      font-size:.95rem;font-weight:700;color:var(--text);
+    }
+    .tpl-overlay-desc{
+      font-size:.72rem;color:var(--muted);line-height:1.4;
+    }
+
+    /* Badge jumlah foto */
+    .tpl-badge{
+      padding:3px 9px;border-radius:999px;
+      background:var(--surface);
+      color:var(--accent);font-size:.68rem;font-weight:700;
+      border:1px solid var(--border);
+      white-space:nowrap;flex-shrink:0;
+    }
+
+    /* Checkmark pojok kanan atas area visual */
+    .tpl-check{
+      position:absolute;top:8px;right:8px;
+      width:26px;height:26px;border-radius:50%;
+      background:var(--accent);color:var(--bg);
+      font-size:.85rem;font-weight:700;
+      display:none;align-items:center;justify-content:center;
+      box-shadow:0 2px 8px rgba(0,0,0,.5);
+      z-index:2;
+    }
+    .tpl-card.sel .tpl-check{display:flex}
+
+    /* CTA setelah pilih template */
+    .tpl-cta{
+      margin-top:16px;
+      display:flex;align-items:center;gap:16px;
+    }
+    .selected-info{
+      font-size:.85rem;color:var(--muted);
+      display:flex;align-items:center;gap:8px;
+    }
+    .selected-info strong{color:var(--accent)}
+
+    /* ══════════════════════════════════════
+       PANEL 2 — AMBIL FOTO
+    ══════════════════════════════════════ */
+    .cap-layout{display:grid;grid-template-columns:1fr 340px;gap:24px;align-items:start}
+    @media(max-width:900px){.cap-layout{grid-template-columns:1fr}}
+
+    .vf{aspect-ratio:4/3;background:#000;border-radius:var(--r);overflow:hidden;
+      position:relative;border:1px solid var(--border);box-shadow:0 8px 40px rgba(0,0,0,.6)}
+    .vf img{width:100%;height:100%;object-fit:cover}
+    .vfc{position:absolute;width:26px;height:26px;border-color:var(--accent);
+      border-style:solid;border-width:0;opacity:.7}
+    .vfc.tl{top:12px;left:12px;border-top-width:2px;border-left-width:2px}
+    .vfc.tr{top:12px;right:12px;border-top-width:2px;border-right-width:2px}
+    .vfc.bl{bottom:12px;left:12px;border-bottom-width:2px;border-left-width:2px}
+    .vfc.br{bottom:12px;right:12px;border-bottom-width:2px;border-right-width:2px}
+    .cd-ov{position:absolute;inset:0;display:none;align-items:center;justify-content:center;
+      background:rgba(0,0,0,.55);backdrop-filter:blur(3px)}
+    .cd-ov.show{display:flex}
+    .cd-n{font-family:'Playfair Display',serif;font-size:7rem;color:var(--accent);
+      text-shadow:0 0 60px var(--accent);animation:cdpop 1s ease-in-out}
+    @keyframes cdpop{0%{transform:scale(1.5);opacity:0}40%{transform:scale(1);opacity:1}85%{transform:scale(.9);opacity:1}100%{transform:scale(.8);opacity:0}}
+    .flashov{position:absolute;inset:0;background:#fff;opacity:0;pointer-events:none;transition:opacity .05s}
+    .flashov.on{opacity:1}
+    .vf-btns{display:flex;gap:8px;margin-top:10px}
+
+    /* Slot panel kanan */
+    .slot-panel{display:flex;flex-direction:column;gap:12px}
+    .slot-header{display:flex;align-items:center;justify-content:space-between}
+    .slot-title{font-family:'Playfair Display',serif;font-size:1rem;color:var(--accent)}
+    .slot-counter{font-size:.73rem;color:var(--muted);background:var(--card);
+      border:1px solid var(--border);padding:3px 10px;border-radius:999px}
+
+    #slot-grid{display:grid;gap:6px;background:var(--card);
+      border:1px solid var(--border);border-radius:var(--r);padding:10px}
+    .pslot{background:var(--surface);border-radius:8px;border:2px dashed var(--border);
+      overflow:hidden;display:flex;align-items:center;justify-content:center;
+      position:relative;transition:all .25s;min-height:55px}
+    .pslot.circle{border-radius:50%}
+    .pslot.filled{border-style:solid;border-color:var(--accent);
+      box-shadow:0 0 12px rgba(232,201,122,.2)}
+    .pslot.active-s{border-style:solid;border-color:var(--accent2);
+      animation:puls .8s infinite alternate}
+    @keyframes puls{from{box-shadow:0 0 6px rgba(167,139,250,.2)}to{box-shadow:0 0 18px rgba(167,139,250,.5)}}
+    .pslot img{width:100%;height:100%;object-fit:cover}
+    .pslot .pe{display:flex;flex-direction:column;align-items:center;gap:2px;
+      color:var(--muted);font-size:.63rem;pointer-events:none}
+    .pslot .pe span{font-size:1rem}
+    .pslot.filled .pe{display:none}
+    .pslot .pn{position:absolute;top:4px;left:4px;width:15px;height:15px;
+      border-radius:50%;background:rgba(0,0,0,.55);color:#fff;
+      font-size:.56rem;font-weight:700;display:flex;align-items:center;justify-content:center}
+
+    .prog-wrap{background:var(--border);border-radius:999px;height:5px;overflow:hidden}
+    .prog-fill{height:100%;border-radius:999px;
+      background:linear-gradient(90deg,var(--accent),var(--accent2));transition:width .4s}
+    .cap-btn{width:100%;padding:15px;background:var(--accent);color:var(--bg);border:none;
+      border-radius:var(--r);font-family:'DM Sans',sans-serif;font-size:.97rem;font-weight:600;
+      cursor:pointer;display:flex;align-items:center;justify-content:center;
+      gap:10px;transition:all .2s;letter-spacing:.01em}
+    .cap-btn:hover:not(:disabled){background:#f5d88a;transform:translateY(-2px);
+      box-shadow:0 8px 24px rgba(232,201,122,.3)}
+    .cap-btn:disabled{opacity:.4;cursor:not-allowed}
+
+    /* ══════════════════════════════════════
+       PANEL 3 — HASIL
+    ══════════════════════════════════════ */
+    .res-layout{display:grid;grid-template-columns:1fr 350px;gap:28px;align-items:start}
+    @media(max-width:900px){.res-layout{grid-template-columns:1fr}}
+    .res-img{background:var(--card);border:1px solid var(--border);border-radius:var(--r);
+      overflow:hidden;min-height:360px;display:flex;align-items:center;justify-content:center}
+    .res-img img{max-width:100%;max-height:70vh;object-fit:contain}
+    .act-col{display:flex;flex-direction:column;gap:12px}
+    .act-card{background:var(--card);border:1px solid var(--border);
+      border-radius:var(--r);padding:16px 18px}
+    .act-card h3{font-family:'Playfair Display',serif;font-size:.95rem;
+      margin-bottom:9px;display:flex;align-items:center;gap:8px}
+    .qr-box{display:flex;flex-direction:column;align-items:center;gap:10px;padding:10px 0}
+    .qr-box img{width:150px;height:150px;border-radius:10px;border:4px solid white;background:white}
+    .qr-url{font-size:.7rem;color:var(--muted);text-align:center;word-break:break-all}
+
+    /* ── Shared ── */
+    .btn{padding:9px 18px;border-radius:9px;font-family:'DM Sans',sans-serif;
+      font-size:.84rem;font-weight:500;cursor:pointer;border:none;
+      display:inline-flex;align-items:center;gap:6px;transition:all .2s}
+    .btn-gold{background:var(--accent);color:var(--bg)}
+    .btn-gold:hover{background:#f5d88a;transform:translateY(-1px)}
+    .btn-ghost{background:var(--card);color:var(--text);border:1px solid var(--border)}
+    .btn-ghost:hover{border-color:var(--accent)}
+    .btn-danger{background:rgba(248,113,113,.1);color:var(--danger);border:1px solid rgba(248,113,113,.25)}
+    .btn-full{width:100%;justify-content:center}
+    .btn:disabled{opacity:.4;cursor:not-allowed}
+    #toasts{position:fixed;bottom:20px;right:20px;z-index:9000;display:flex;flex-direction:column;gap:8px}
+    .toast{background:var(--card);border:1px solid var(--border);border-radius:10px;
+      padding:10px 16px;font-size:.82rem;display:flex;align-items:center;gap:8px;animation:si .3s ease}
+    .toast.ok{border-color:var(--success)}.toast.err{border-color:var(--danger)}
+    @keyframes si{from{transform:translateX(20px);opacity:0}to{transform:translateX(0);opacity:1}}
+    .spin{width:16px;height:16px;border-radius:50%;border:2px solid var(--border);
+      border-top-color:var(--accent);animation:rot .7s linear infinite;display:inline-block}
+    @keyframes rot{to{transform:rotate(360deg)}}
+    .muted{color:var(--muted);font-size:.8rem}
+    .mt8{margin-top:8px}.flex{display:flex}.gap8{gap:8px}
+    .hidden{display:none!important}
+    footer{text-align:center;padding:14px;font-size:.73rem;color:var(--muted);border-top:1px solid var(--border)}
+  </style>
+</head>
+<body>
+
+<header>
+  <div class="logo">Photo<em>Box</em> Studio</div>
+  <div class="pills">
+    <div class="pill" id="pcam"><span class="dot"></span><span id="ctxt">Mengecek...</span></div>
+    <div class="pill" id="pdrv"><span class="dot"></span><span>Google Drive</span></div>
+  </div>
+</header>
+
+<div class="steps">
+  <div class="step active" id="s1"><span class="n">1</span>Pilih Template</div>
+  <div class="step"        id="s2"><span class="n">2</span>Ambil Foto</div>
+  <div class="step"        id="s3"><span class="n">3</span>Hasil &amp; Bagikan</div>
+</div>
+
+<main>
+
+<!-- ══ PANEL 1: PILIH TEMPLATE ══ -->
+<div class="panel active" id="p1">
+  <div class="tpl-page-title">
+    <h2>Pilih <span style="color:var(--accent)">Template</span></h2>
+    <p>Geser untuk melihat semua template — klik untuk memilih</p>
+  </div>
+
+  <div class="tpl-carousel" id="tpl-carousel">
+    <!-- Diisi oleh JS -->
+    <div style="display:flex;align-items:center;gap:12px;color:var(--muted);padding:40px">
+      <div class="spin"></div> Memuat template...
+    </div>
+  </div>
+
+  <div class="tpl-cta">
+    <button class="btn btn-gold" id="btn-go-capture" onclick="goCapture()"
+      style="padding:13px 28px;font-size:.97rem" disabled>
+      Lanjut Ambil Foto →
+    </button>
+    <div class="selected-info" id="sel-info" style="display:none">
+      Template: <strong id="sel-name">–</strong>
+      &nbsp;•&nbsp; <strong id="sel-count">–</strong> foto
+    </div>
+  </div>
+</div>
+
+<!-- ══ PANEL 2: AMBIL FOTO ══ -->
+<div class="panel" id="p2">
+  <div class="cap-layout">
+    <div>
+      <div class="vf" id="vf">
+        <img id="vfimg" src="" alt="" style="display:none" onerror="vfErr()"/>
+        <div id="vfph" style="display:flex;align-items:center;justify-content:center;height:100%;flex-direction:column;gap:12px">
+          <div style="font-size:2.5rem">📷</div>
+          <div class="muted">Klik Mulai Preview</div>
+          <button class="btn btn-ghost" onclick="startPrev()">▶ Mulai Preview</button>
+        </div>
+        <div id="vferr" style="display:none;position:absolute;inset:0;background:rgba(0,0,0,.85);
+          flex-direction:column;align-items:center;justify-content:center;gap:10px;text-align:center;padding:20px">
+          <div style="font-size:1.8rem">⚠️</div>
+          <div style="color:var(--danger);font-size:.88rem">Live View tidak aktif</div>
+          <div class="muted">Tekan tombol Lv di digiCamControl</div>
+          <button class="btn btn-ghost" onclick="startPrev()" style="margin-top:6px">🔄 Coba Lagi</button>
+        </div>
+        <div class="vfc tl"></div><div class="vfc tr"></div>
+        <div class="vfc bl"></div><div class="vfc br"></div>
+        <div class="cd-ov" id="cdov"><div class="cd-n" id="cdn">3</div></div>
+        <div class="flashov" id="flov"></div>
+      </div>
+      <div class="vf-btns">
+        <button class="btn btn-ghost" onclick="startPrev()">🔄 Refresh</button>
+        <button class="btn btn-ghost" onclick="stopPrev()">⏹ Stop</button>
+        <button class="btn btn-ghost" onclick="goStep(1)">← Template</button>
+      </div>
+    </div>
+
+    <div class="slot-panel">
+      <div class="slot-header">
+        <div class="slot-title" id="stitle">–</div>
+        <div class="slot-counter" id="scounter">0 / 0</div>
+      </div>
+      <div class="muted" id="sinfo">Sesi belum dimulai</div>
+      <div id="slot-grid"></div>
+      <div>
+        <div class="prog-wrap"><div class="prog-fill" id="pf" style="width:0%"></div></div>
+        <div class="muted mt8" id="plbl">0 / 0 foto</div>
+      </div>
+      <button class="cap-btn" id="capbtn" onclick="doCapture()">
+        <span>📸</span><span id="caplbl">Mulai &amp; Ambil Foto</span>
+      </button>
+      <button class="btn btn-danger btn-full hidden" id="rstbtn" onclick="resetSesi()">🔄 Ulang Sesi</button>
+    </div>
+  </div>
+</div>
+
+<!-- ══ PANEL 3: HASIL ══ -->
+<div class="panel" id="p3">
+  <h2 style="font-family:'Playfair Display',serif;font-size:1.6rem;margin-bottom:22px">
+    Hasil <span style="color:var(--accent)">Foto Anda</span> 🎉
+  </h2>
+  <div class="res-layout">
+    <div class="res-img" id="resimg">
+      <div style="text-align:center;color:var(--muted)">
+        <div class="spin"></div><div class="mt8">Memproses...</div>
+      </div>
+    </div>
+    <div class="act-col">
+      <div class="act-card">
+        <h3>☁️ Google Drive + QR Code</h3>
+        <p class="muted" style="font-size:.79rem;margin-bottom:10px">Upload foto dan dapatkan QR code untuk di-scan</p>
+        <button class="btn btn-gold btn-full" id="upbtn" onclick="uploadDrive()">Upload &amp; Buat QR</button>
+        <div id="qrsec" class="hidden">
+          <div class="qr-box">
+            <img id="qrimg" src="" alt="QR"/>
+            <p class="qr-url" id="qrurl"></p>
+            <p class="muted" style="font-size:.68rem">Scan untuk download foto</p>
+          </div>
+        </div>
+      </div>
+      <div class="act-card">
+        <h3>🖨️ Cetak Foto</h3>
+        <p class="muted" style="font-size:.79rem;margin-bottom:10px">Cetak ke printer yang tersambung</p>
+        <button class="btn btn-ghost btn-full" onclick="printFoto()">🖨️ Cetak Sekarang</button>
+      </div>
+      <div class="act-card">
+        <h3>🔁 Sesi Baru</h3>
+        <button class="btn btn-danger btn-full" onclick="newSesi()">Mulai Sesi Baru</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+</main>
+<footer>PhotoBox Studio v1.0 &nbsp;•&nbsp; Canon 700D + digiCamControl</footer>
+<div id="toasts"></div>
+
+<script>
+const API='http://localhost:5000/api', MJPEG='http://127.0.0.1:5514/live';
+
+const S={tpl:null,tplData:null,sid:null,n:0,required:0,busy:false,templates:[]};
+
+// ── Template visual configs (warna background + slot colors per template) ──
+const TPL_VISUAL = {
+  duo_portrait:  { bg:'#f0f0f5', slots:'#b0b0c8', text:'dark' },
+  circle_duo:    { bg:'#0f0f2a', slots:'#3a3a6a', text:'light' },
+  triptych:      { bg:'#fafafa', slots:'#c8c8c8', text:'dark' },
+  story_3:       { bg:'#0f0f1e', slots:'#2a2a50', text:'light' },
+  classic_strip: { bg:'#ffffff', slots:'#cccccc', text:'dark' },
+  polaroid_grid: { bg:'#f5f0e6', slots:'#c8bfaa', text:'dark' },
+  film_noir:     { bg:'#0c0c0c', slots:'#2a2a2a', text:'light' },
+  pastel_fun:    { bg:'#ffe1f0', slots:'#f0a0c0', text:'dark'  },
+  grid_6:        { bg:'#f8f8ff', slots:'#c0c0d8', text:'dark' },
+  magazine_6:    { bg:'#141420', slots:'#2a2a40', text:'light' },
+};
+
+window.onload = async () => {
+  checkStat();
+  await loadTemplates();
+};
+
+async function checkStat(){
+  try{
+    const d=await(await fetch(`${API}/status`)).json();
+    const p=document.getElementById('pcam'),t=document.getElementById('ctxt');
+    if(d.camera_connected){p.className='pill ok';t.textContent=d.camera_model||'Kamera Terhubung';}
+    else{p.className='pill err';t.textContent='Kamera Tidak Terdeteksi';}
+  }catch(e){toast('Server tidak merespons — jalankan app.py','err');}
+}
+
+// ── Load Templates ────────────────────────────────────────────────────────────
+async function loadTemplates(){
+  try{
+    const templates=await(await fetch(`${API}/templates`)).json();
+    S.templates=templates;
+    renderCarousel(templates);
+  }catch(e){
+    renderCarousel(getFallbackTemplates());
+  }
+}
+
+function renderCarousel(templates){
+  const carousel = document.getElementById('tpl-carousel');
+  carousel.innerHTML = '';
+
+  templates.forEach(t => {
+    const card = document.createElement('div');
+    card.className = 'tpl-card';
+    card.id = `tc-${t.id}`;
+    card.onclick = () => selTpl(t.id, t);
+
+    const thumbUrl = t.thumbnail_url || `${API}/templates/${t.id}/thumbnail`;
+
+    // canvas dimensi proporsional dari canvas_size template
+    const [cw, ch] = t.canvas_size || [4, 3];
+    const aspectPct = ((ch / cw) * 100).toFixed(2); // untuk padding-bottom trick
+
+    card.innerHTML = `
+      <div class="tpl-visual">
+        <!-- Wrapper rasio proporsional agar gambar tidak di-crop -->
+        <div style="width:100%;position:relative;padding-bottom:${aspectPct}%">
+          <img class="tpl-img"
+            src="${thumbUrl}"
+            alt="${t.name}"
+            style="position:absolute;inset:0;width:100%;height:100%;
+                   object-fit:contain;border-radius:6px;
+                   box-shadow:0 4px 16px rgba(0,0,0,.4)"
+          />
+          <canvas class="tpl-cv" id="cv-${t.id}"
+            style="display:none;position:absolute;inset:0;
+                   width:100%;height:100%;border-radius:6px"></canvas>
+        </div>
+        <div class="tpl-check">✓</div>
+      </div>
+      <div class="tpl-info">
+        <div class="tpl-info-row">
+          <div class="tpl-overlay-name">${t.name}</div>
+          <div class="tpl-badge">${t.photo_count} foto</div>
+        </div>
+        <div class="tpl-overlay-desc">${t.description}</div>
+      </div>
+    `;
+    carousel.appendChild(card);
+
+    // Fallback canvas jika thumbnail server gagal
+    const imgEl = card.querySelector('img.tpl-img');
+    imgEl.onerror = () => {
+      imgEl.style.display = 'none';
+      const cv = card.querySelector('canvas.tpl-cv');
+      cv.style.display = 'block';
+      // Gambar fallback proporsional
+      drawFallbackThumb(t, cv, cw, ch);
+    };
+  });
+}
+
+// Fallback: gambar slot di canvas jika tidak ada PNG — proporsional sesuai canvas_size
+function drawFallbackThumb(t, c, natW, natH){
+  const [tw, th] = t.canvas_size || [natW||4, natH||3];
+  const CW=Math.min(tw, 480), CH=Math.round(CW * th/tw);
+  c.width=CW; c.height=CH;
+  c.style.aspectRatio = `${tw}/${th}`;
+  const ctx=c.getContext('2d');
+
+  // Background
+  ctx.fillStyle='#1a1a24';
+  ctx.fillRect(0,0,CW,CH);
+
+  const scale=Math.min((CW-16)/tw,(CH-16)/th);
+  const ox=(CW-tw*scale)/2, oy=(CH-th*scale)/2;
+
+  if(t.photo_slots){
+    t.photo_slots.forEach((slot,i)=>{
+      const x=ox+slot.x*scale, y=oy+slot.y*scale;
+      const w=slot.w*scale, h=slot.h*scale;
+      ctx.fillStyle=`hsl(${220+i*30},20%,30%)`;
+      if(slot.shape==='round'){
+        ctx.beginPath(); ctx.ellipse(x+w/2,y+h/2,w/2,h/2,0,0,Math.PI*2); ctx.fill();
+      } else {
+        const r=Math.min(slot.round_radius||0,Math.min(w,h)/2)*scale;
+        if(r>0){
+          ctx.beginPath();
+          ctx.roundRect(x,y,w,h,r*scale);
+          ctx.fill();
+        } else {
+          ctx.fillRect(x,y,w,h);
+        }
+      }
+      ctx.fillStyle='rgba(255,255,255,0.35)';
+      ctx.font=`600 ${Math.max(8,Math.min(w,h)*.28)}px sans-serif`;
+      ctx.textAlign='center'; ctx.textBaseline='middle';
+      ctx.fillText(i+1, x+w/2, y+h/2);
+    });
+  }
+}
+
+// ── Select Template ───────────────────────────────────────────────────────────
+function selTpl(id, tData){
+  S.tpl = id;
+  S.tplData = tData || S.templates.find(t=>t.id===id);
+  S.required = S.tplData ? S.tplData.photo_count : 4;
+
+  // Update UI kartu
+  document.querySelectorAll('.tpl-card').forEach(c=>c.classList.remove('sel'));
+  document.getElementById(`tc-${id}`).classList.add('sel');
+
+  // Update info & aktifkan tombol lanjut
+  document.getElementById('sel-name').textContent = S.tplData.name;
+  document.getElementById('sel-count').textContent = S.required;
+  document.getElementById('sel-info').style.display = 'flex';
+  document.getElementById('btn-go-capture').disabled = false;
+
+  // Scroll kartu ke viewport jika perlu
+  const card = document.getElementById(`tc-${id}`);
+  card.scrollIntoView({behavior:'smooth', block:'nearest'});
+}
+
+function goCapture(){
+  if(!S.tpl){ toast('Pilih template dulu!','err'); return; }
+  buildSlotGrid(S.tplData);
+  document.getElementById('stitle').textContent = S.tplData.name;
+  updateCounter();
+  goStep(2);
+  setTimeout(startPrev, 400);
+}
+
+// ── Build Slot Grid (panel 2) ─────────────────────────────────────────────────
+function buildSlotGrid(tpl){
+  const grid = document.getElementById('slot-grid');
+  grid.innerHTML = '';
+  const count = tpl.photo_count;
+  const [cw, ch] = tpl.canvas_size;
+  const slots = tpl.photo_slots || [];
+
+  // Tentukan grid layout berdasarkan struktur slot
+  let cols = 1;
+  if(count === 2) cols = 2;
+  else if(count === 3){
+    const bigFirst = slots[0] && slots[1] && slots[0].h > slots[1].h * 1.4;
+    cols = bigFirst ? 2 : 3;
+  }
+  else if(count === 4){
+    const isStrip = slots.every(s => Math.abs(s.w - slots[0].w) < 60) && ch > cw;
+    cols = isStrip ? 1 : 2;
+  }
+  else if(count === 6) cols = 2;
+
+  grid.style.gridTemplateColumns = `repeat(${cols}, 1fr)`;
+
+  for(let i=1; i<=count; i++){
+    const slot = slots[i-1] || {};
+    const isRound = slot.shape === 'round';
+    const div = document.createElement('div');
+    div.className = 'pslot' + (isRound ? ' circle' : '');
+    div.id = `ps${i}`;
+    div.style.aspectRatio = slot.w && slot.h ? `${slot.w}/${slot.h}` : '4/3';
+
+    // Story 3: slot pertama span full width
+    if(count === 3 && i === 1 && cols === 2){
+      div.style.gridColumn = '1/-1';
+      div.style.aspectRatio = '4/3';
+    }
+    // Magazine 6: slot pertama span 3 baris
+    if(tpl.id === 'magazine_6' && i === 1){
+      div.style.gridRow = '1/4';
+      div.style.aspectRatio = `${slot.w||1}/${slot.h||1}`;
+    }
+
+    div.innerHTML = `<span class="pn">${i}</span><div class="pe"><span>📷</span>${i}</div>`;
+    grid.appendChild(div);
+  }
+}
+
+function updateCounter(){
+  const txt = `${S.n} / ${S.required}`;
+  document.getElementById('scounter').textContent = txt;
+  document.getElementById('plbl').textContent = txt + ' foto diambil';
+  document.getElementById('pf').style.width = (S.required>0 ? S.n/S.required*100 : 0)+'%';
+  const rem = S.required - S.n;
+  document.getElementById('caplbl').textContent =
+    S.n===0 ? 'Mulai & Ambil Foto' :
+    rem>0   ? `Ambil Foto (${rem} tersisa)` : 'Semua Foto ✓';
+}
+
+// ── Preview ────────────────────────────────────────────────────────────────────
+function startPrev(){
+  const img=document.getElementById('vfimg');
+  document.getElementById('vfph').style.display='none';
+  document.getElementById('vferr').style.display='none';
+  img.style.display='block';
+  img.src=MJPEG+'?t='+Date.now();
+  fetch(`${API}/camera/preview/start`,{method:'POST'}).catch(()=>{});
+}
+function stopPrev(){
+  const img=document.getElementById('vfimg');
+  img.src=''; img.style.display='none';
+  document.getElementById('vfph').style.display='flex';
+  fetch(`${API}/camera/preview/stop`,{method:'POST'}).catch(()=>{});
+}
+function vfErr(){
+  document.getElementById('vfimg').style.display='none';
+  document.getElementById('vferr').style.display='flex';
+}
+
+// ── Capture ────────────────────────────────────────────────────────────────────
+async function doCapture(){
+  if(S.busy||S.n>=S.required) return;
+  S.busy=true;
+  if(!S.sid){
+    try{
+      const d=await(await fetch(`${API}/session/start`,{method:'POST'})).json();
+      S.sid=d.session_id;
+      document.getElementById('sinfo').textContent='Sesi: '+S.sid;
+      document.getElementById('rstbtn').classList.remove('hidden');
+    }catch(e){toast('Gagal buat sesi','err');S.busy=false;return;}
+  }
+  await countdown(); doFlash();
+  const btn=document.getElementById('capbtn');
+  btn.disabled=true;
+  document.getElementById('caplbl').textContent='Mengambil foto...';
+  hlSlot(S.n+1);
+  try{
+    const d=await(await fetch(`${API}/session/${S.sid}/capture`,{method:'POST'})).json();
+    if(d.success){
+      S.n=d.total;
+      fillSlot(d.photo_index,d.thumbnail);
+      updateCounter();
+      toast(`✅ Foto ${d.photo_index} berhasil!`,'ok');
+      if(S.n>=S.required) setTimeout(processResult,800);
+    }else{ toast('Gagal: '+(d.error||'?'),'err'); }
+  }catch(e){ toast('Koneksi error','err'); }
+  clrSlot(); btn.disabled=false; updateCounter(); S.busy=false;
+}
+
+function fillSlot(i,thumb){
+  const s=document.getElementById(`ps${i}`);
+  if(!s) return;
+  s.classList.add('filled');
+  s.innerHTML=`<span class="pn">${i}</span><img src="${thumb}" alt="${i}"/>`;
+}
+function hlSlot(i){clrSlot();const s=document.getElementById(`ps${i}`);if(s)s.classList.add('active-s');}
+function clrSlot(){document.querySelectorAll('.pslot').forEach(s=>s.classList.remove('active-s'));}
+
+async function processResult(){
+  goStep(3);
+  try{
+    const d=await(await fetch(`${API}/session/${S.sid}/apply-template`,{
+      method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({template_id:S.tpl})
+    })).json();
+    if(d.success){
+      document.getElementById('resimg').innerHTML=`<img src="${d.result_image}" alt="Hasil"/>`;
+      toast('✨ Foto selesai!','ok');
+    }else{ toast('Template gagal: '+d.error,'err'); }
+  }catch(e){ toast('Error server','err'); }
+}
+
+async function uploadDrive(){
+  if(!S.sid) return;
+  const btn=document.getElementById('upbtn');
+  btn.innerHTML='<span class="spin"></span> Mengupload...'; btn.disabled=true;
+  try{
+    const d=await(await fetch(`${API}/session/${S.sid}/upload-drive`,{method:'POST'})).json();
+    if(d.success){
+      document.getElementById('qrsec').classList.remove('hidden');
+      document.getElementById('qrimg').src=d.qr_code;
+      document.getElementById('qrurl').textContent=d.drive_url;
+      btn.innerHTML='✅ Sudah Diupload';
+      toast('☁️ Upload berhasil!','ok');
+    }else{ toast('Upload gagal: '+d.error,'err'); btn.innerHTML='⚠️ Coba Lagi'; btn.disabled=false; }
+  }catch(e){ toast('Koneksi error','err'); btn.innerHTML='⚠️ Coba Lagi'; btn.disabled=false; }
+}
+
+async function printFoto(){
+  if(!S.sid) return;
+  const d=await(await fetch(`${API}/session/${S.sid}/print`,{method:'POST'})).json();
+  toast(d.success?'🖨️ Mengirim ke printer...':'❌ '+d.error, d.success?'ok':'err');
+}
+
+function resetSesi(){
+  S.sid=null; S.n=0;
+  buildSlotGrid(S.tplData); updateCounter();
+  document.getElementById('sinfo').textContent='Sesi belum dimulai';
+  document.getElementById('rstbtn').classList.add('hidden');
+  document.getElementById('capbtn').disabled=false;
+}
+
+function newSesi(){
+  resetSesi(); goStep(1);
+  document.getElementById('qrsec').classList.add('hidden');
+  document.getElementById('upbtn').innerHTML='Upload & Buat QR';
+  document.getElementById('upbtn').disabled=false;
+  document.getElementById('resimg').innerHTML='<div style="text-align:center;color:var(--muted)"><div class="spin"></div><div class="mt8">Memproses...</div></div>';
+}
+
+function goStep(n){
+  ['p1','p2','p3'].forEach((id,i)=>document.getElementById(id).classList.toggle('active',i+1===n));
+  ['s1','s2','s3'].forEach((id,i)=>{
+    document.getElementById(id).className='step'+(i+1===n?' active':i+1<n?' done':'');
+  });
+}
+
+async function countdown(){
+  const ov=document.getElementById('cdov'),n=document.getElementById('cdn');
+  ov.classList.add('show');
+  for(let i=3;i>=1;i--){
+    n.textContent=i; n.style.animation='none'; n.offsetHeight;
+    n.style.animation='cdpop 1s ease-in-out';
+    await new Promise(r=>setTimeout(r,1000));
+  }
+  ov.classList.remove('show');
+}
+function doFlash(){ const f=document.getElementById('flov'); f.classList.add('on'); setTimeout(()=>f.classList.remove('on'),120); }
+function toast(msg,type='info'){
+  const c=document.getElementById('toasts'),t=document.createElement('div');
+  t.className=`toast ${type}`;
+  t.innerHTML=`<span>${{ok:'✅',err:'❌',info:'ℹ️'}[type]||''}</span><span>${msg}</span>`;
+  c.appendChild(t); setTimeout(()=>t.remove(),4000);
+}
+
+function getFallbackTemplates(){
+  return [
+    {id:'duo_portrait',name:'Duo Portrait',description:'2 foto berdampingan elegan',photo_count:2,canvas_size:[1200,700],photo_slots:[{x:40,y:40,w:540,h:620,shape:'rect'},{x:620,y:40,w:540,h:620,shape:'rect'}]},
+    {id:'circle_duo',name:'Circle Duo',description:'2 foto lingkaran latar gelap',photo_count:2,canvas_size:[1200,600],photo_slots:[{x:150,y:75,w:450,h:450,shape:'round'},{x:600,y:75,w:450,h:450,shape:'round'}]},
+    {id:'triptych',name:'Triptych',description:'3 foto sejajar gaya galeri',photo_count:3,canvas_size:[1800,700],photo_slots:[{x:40,y:40,w:560,h:620,shape:'rect'},{x:620,y:40,w:560,h:620,shape:'rect'},{x:1200,y:40,w:560,h:620,shape:'rect'}]},
+    {id:'story_3',name:'Story 3',description:'1 besar + 2 kecil format story',photo_count:3,canvas_size:[900,1600],photo_slots:[{x:40,y:40,w:820,h:820,shape:'rect'},{x:40,y:900,w:395,h:660,shape:'rect'},{x:465,y:900,w:395,h:660,shape:'rect'}]},
+    {id:'classic_strip',name:'Classic Strip',description:'4 foto vertikal photobox klasik',photo_count:4,canvas_size:[600,1900],photo_slots:[{x:50,y:50,w:500,h:380,shape:'rect'},{x:50,y:480,w:500,h:380,shape:'rect'},{x:50,y:910,w:500,h:380,shape:'rect'},{x:50,y:1340,w:500,h:380,shape:'rect'}]},
+    {id:'polaroid_grid',name:'Polaroid Grid',description:'4 foto grid 2×2 vintage',photo_count:4,canvas_size:[1200,1300],photo_slots:[{x:60,y:60,w:510,h:510,shape:'rect'},{x:630,y:60,w:510,h:510,shape:'rect'},{x:60,y:630,w:510,h:510,shape:'rect'},{x:630,y:630,w:510,h:510,shape:'rect'}]},
+    {id:'film_noir',name:'Film Noir',description:'4 foto strip hitam-putih sinematik',photo_count:4,canvas_size:[700,2100],photo_slots:[{x:80,y:110,w:540,h:400,shape:'rect'},{x:80,y:580,w:540,h:400,shape:'rect'},{x:80,y:1050,w:540,h:400,shape:'rect'},{x:80,y:1520,w:540,h:400,shape:'rect'}]},
+    {id:'pastel_fun',name:'Pastel Fun',description:'4 foto asimetris warna-warni',photo_count:4,canvas_size:[1200,900],photo_slots:[{x:30,y:30,w:280,h:840,shape:'rect'},{x:340,y:30,w:280,h:405,shape:'rect'},{x:340,y:465,w:280,h:405,shape:'rect'},{x:640,y:30,w:530,h:840,shape:'rect'}]},
+    {id:'grid_6',name:'Grid 6',description:'6 foto grid 2×3 lengkap',photo_count:6,canvas_size:[1200,1800],photo_slots:[{x:40,y:40,w:540,h:540,shape:'rect'},{x:620,y:40,w:540,h:540,shape:'rect'},{x:40,y:620,w:540,h:540,shape:'rect'},{x:620,y:620,w:540,h:540,shape:'rect'},{x:40,y:1200,w:540,h:540,shape:'rect'},{x:620,y:1200,w:540,h:540,shape:'rect'}]},
+    {id:'magazine_6',name:'Magazine 6',description:'6 foto layout majalah 1 besar + 5 kecil',photo_count:6,canvas_size:[1400,1000],photo_slots:[{x:20,y:20,w:680,h:960,shape:'rect'},{x:720,y:20,w:320,h:185,shape:'rect'},{x:1060,y:20,w:320,h:185,shape:'rect'},{x:720,y:225,w:320,h:185,shape:'rect'},{x:1060,y:225,w:320,h:185,shape:'rect'},{x:720,y:430,w:660,h:550,shape:'rect'}]},
+  ];
+}
+</script>
+</body>
+</html>

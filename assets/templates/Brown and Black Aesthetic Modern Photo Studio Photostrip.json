@@ -1,0 +1,41 @@
+{
+  "id": "Brown and Black Aesthetic Modern Photo Studio Photostrip",
+  "name": "Brown And Black Aesthetic Modern Photo Studio Photostrip",
+  "description": "Template dengan 3 foto",
+  "photo_count": 3,
+  "canvas_size": [
+    591,
+    1772
+  ],
+  "background_image": "Brown and Black Aesthetic Modern Photo Studio Photostrip.png",
+  "background_color": "#ffffff",
+  "slots": [
+    {
+      "id": 1,
+      "x": 88,
+      "y": 99,
+      "w": 415,
+      "h": 415,
+      "shape": "rect",
+      "round_radius": 0
+    },
+    {
+      "id": 2,
+      "x": 88,
+      "y": 611,
+      "w": 415,
+      "h": 414,
+      "shape": "rect",
+      "round_radius": 0
+    },
+    {
+      "id": 3,
+      "x": 88,
+      "y": 1122,
+      "w": 415,
+      "h": 415,
+      "shape": "rect",
+      "round_radius": 0
+    }
+  ]
+}

@@ -1,0 +1,41 @@
+{
+  "id": "Yellow and Beige Fun Pop Illustrated Typography Photobox Photo Strip",
+  "name": "Yellow And Beige Fun Pop Illustrated Typography Photobox Photo Strip",
+  "description": "Template dengan 3 foto",
+  "photo_count": 3,
+  "canvas_size": [
+    591,
+    1772
+  ],
+  "background_image": "Yellow and Beige Fun Pop Illustrated Typography Photobox Photo Strip.png",
+  "background_color": "#ffffff",
+  "slots": [
+    {
+      "id": 1,
+      "x": 108,
+      "y": 123,
+      "w": 374,
+      "h": 366,
+      "shape": "round",
+      "round_radius": 0
+    },
+    {
+      "id": 2,
+      "x": 108,
+      "y": 628,
+      "w": 374,
+      "h": 366,
+      "shape": "round",
+      "round_radius": 0
+    },
+    {
+      "id": 3,
+      "x": 108,
+      "y": 1134,
+      "w": 374,
+      "h": 353,
+      "shape": "round",
+      "round_radius": 0
+    }
+  ]
+}
