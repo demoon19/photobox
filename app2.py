@@ -50,8 +50,6 @@ SCOPES = ['https://www.googleapis.com/auth/drive.file']
 camera_connected = False
 current_session = None
 preview_active = False
-preview_thread = None    # Tambahan untuk mencegah tabrakan Live View
-is_capturing = False     # <-- INI YANG MEMBUAT ERROR, pastikan ada di sini!
 
 
 # ─── Kamera Canon via digiCamControl HTTP API ────────────────────────────────
@@ -105,37 +103,67 @@ def check_camera() -> bool:
 
 
 def capture_photo(output_path: str) -> bool:
-    import os
-    import time
-    import glob
-    import shutil
-    import urllib.request
-    
-    global is_capturing
-    # KUNCI GEMBOK DI AWAL
-    is_capturing = True 
+    """
+    Ambil foto via digiCamControl HTTP API.
+    Strategi:
+      1. Panggil /capture via HTTP → DCC trigger kamera
+      2. Cari file JPG terbaru di folder session DCC (dari screenshot: D:/app file/digicamControl)
+      3. Copy ke output_path kita
+    """
+    import glob as _glob, shutil, json as _json
 
     try:
         os.makedirs(os.path.dirname(output_path), exist_ok=True)
-        print(f"📸 Trigger capture via HTTP API (/?CMD=Capture)...")
+        print(f"📸 Trigger capture via HTTP...")
+
+        # Catat waktu sebelum capture untuk filter file baru
         capture_time = time.time()
 
-        try:
-            urllib.request.urlopen(f"{DCC_HOST}/?CMD=Capture", timeout=3)
-            print("   [Info] Perintah capture terkirim.")
-        except Exception:
-            pass
+        # Trigger capture via HTTP API digiCamControl
+        # DCC web API endpoint untuk capture: GET /capture
+        # Ref: http://digicamcontrol.com/doc/serverapi
+        triggered = False
+        for capture_endpoint in ["/capture", "/?CMD=Capture", "/session/capture"]:
+            try:
+                print(f"   Trigger capture: {DCC_HOST}{capture_endpoint}")
+                data, status = dcc_get(capture_endpoint, timeout=30)
+                print(f"   Response ({status}): {data[:150]}")
+                triggered = True
+                break
+            except Exception as e:
+                print(f"   Endpoint {capture_endpoint} gagal: {e}")
+                continue
 
-        dcc_base = os.path.join("D:\\", "app file", "digicamControl", "foto")
-        start_poll = time.time()
-        
-        while (time.time() - start_poll) < 12.0:
-            newest_file = None
-            newest_mtime = capture_time - 1
+        if not triggered:
+            print("❌ Semua endpoint capture gagal")
+            print("   Pastikan digiCamControl terbuka dan web server aktif di port 5513")
 
-            if os.path.exists(dcc_base):
-                for f in glob.glob(os.path.join(dcc_base, "**", "*.jpg"), recursive=True):
-                    if "_prev" in f.lower() or "thumb" in f.lower(): continue
+        # Tunggu kamera selesai menulis file (shutter + transfer)
+        print("   Menunggu kamera selesai...")
+        time.sleep(3)
+
+        # Folder penyimpanan DCC sudah terkonfirmasi dari CMD:
+        # D:/app file/digicamControl/DSC_XXXX.JPG
+        dcc_base = os.path.join("D:/", "app file", "digicamControl", "foto")
+        search_dirs = [dcc_base]
+
+        # Tambah subfolder jika ada
+        if os.path.exists(dcc_base):
+            for sub in os.listdir(dcc_base):
+                subpath = os.path.join(dcc_base, sub)
+                if os.path.isdir(subpath):
+                    search_dirs.append(subpath)
+
+        print(f"   Mencari file baru di {len(search_dirs)} folder...")
+
+        newest_file = None
+        newest_mtime = capture_time - 2  # toleransi 2 detik sebelum capture
+
+        for d in search_dirs:
+            if not os.path.exists(d):
+                continue
+            for ext in ["*.jpg", "*.JPG", "*.jpeg", "*.JPEG"]:
+                for f in _glob.glob(os.path.join(d, "**", ext), recursive=True):
                     try:
                         mtime = os.path.getmtime(f)
                         if mtime > newest_mtime:
@@ -144,109 +172,91 @@ def capture_photo(output_path: str) -> bool:
                     except Exception:
                         pass
 
-            if newest_file and newest_mtime >= capture_time:
-                time.sleep(0.5) 
-                try:
-                    shutil.copy2(newest_file, output_path)
-                    if os.path.getsize(output_path) > 100000:
-                        print(f"✅ Foto resolusi tinggi berhasil diamankan: {newest_file}")
-                        time.sleep(2.0)
-                        
-                        # === BUKA GEMBOK DI SINI ===
-                        is_capturing = False 
-                        return True
-                except PermissionError:
-                    pass
+        if newest_file:
+            shutil.copy2(newest_file, output_path)
+            print(f"✅ Foto berhasil: {newest_file}")
+            return True
 
-            time.sleep(0.5)
+        # Terakhir: coba download snapshot dari live view sebagai fallback
+        print("   Mencoba fallback snapshot dari live view...")
+        try:
+            snap_data, _ = dcc_get("/liveview.jpg", timeout=5)
+            if snap_data and len(snap_data) > 5000:
+                with open(output_path, 'wb') as f:
+                    f.write(snap_data)
+                print("✅ Fallback snapshot dari live view berhasil")
+                return True
+        except Exception:
+            pass
 
-        # === BUKA GEMBOK JIKA GAGAL/TIMEOUT ===
-        is_capturing = False
+        print("❌ Capture gagal. Cek:")
+        print(f"   - Folder DCC: {dcc_base}")
+        print("   - Pastikan Image Quality = JPEG (bukan RAW)")
+        print("   - Pastikan kamera tidak sleep")
         return False
 
     except Exception as e:
         print(f"Capture error tak terduga: {e}")
-        # === BUKA GEMBOK JIKA TERJADI ERROR ===
-        is_capturing = False
         return False
 
 
-# Tambahkan variabel global ini tepat di bawah 'preview_active = False' (sekitar baris 49)
-preview_thread = None
-
-def stop_live_preview():
-    """Menghentikan loop Live View dengan aman."""
-    global preview_active
-    preview_active = False
-    is_capturing = False
-    print("⏹ Perintah stop Live View diterima.")
-
 def start_live_preview():
-    global preview_active, preview_thread, is_capturing
-
-    if preview_active and preview_thread and preview_thread.is_alive():
-        return
-
+    """
+    Live preview via digiCamControl HTTP API.
+    Endpoint: GET /liveview.jpg  → mengembalikan JPEG frame langsung.
+    Ini sangat cepat dan reliable karena tidak perlu subprocess.
+    """
+    global preview_active
     preview_active = True
 
     def preview_loop():
-        print("▶ Preview loop dimulai...")
+        """
+        Live preview via MJPEG stream port 5514.
+        MJPEG stream hanya aktif saat Live View sudah dinyalakan di DCC.
+        Tidak ada fallback ke /liveview.jpg agar DCC tidak crash.
+        """
         consecutive_errors = 0
+        print("▶ Preview loop dimulai — menunggu MJPEG stream dari DCC...")
 
         while preview_active:
-            if is_capturing:
-                time.sleep(1)
-                continue
-
             try:
                 req = urllib.request.Request(MJPEG_URL)
-                with urllib.request.urlopen(req, timeout=3) as resp:
+                with urllib.request.urlopen(req, timeout=5) as resp:
                     raw = b""
-                    consecutive_errors = 0
-                    last_frame_time = time.time() # Mulai timer Watchdog
-                    
-                    while preview_active and not is_capturing:
+                    while preview_active:
                         chunk = resp.read(4096)
                         if not chunk:
                             break
                         raw += chunk
-                        
+                        # Cari frame JPEG lengkap
                         start = raw.find(b'\xff\xd8')
                         end   = raw.find(b'\xff\xd9')
                         if start != -1 and end != -1 and end > start:
                             jpeg = raw[start:end+2]
-                            if len(jpeg) > 1000: 
+                            if len(jpeg) > 1000:  # frame valid
                                 img_b64 = base64.b64encode(jpeg).decode()
                                 socketio.emit('preview_frame', {
                                     'image': f'data:image/jpeg;base64,{img_b64}'
                                 })
-                                last_frame_time = time.time() # Reset timer karena video lancar
-                            raw = raw[end+2:]
-
-                        # === WATCHDOG TIMER ===
-                        # Jika 3 detik tidak ada video baru, berarti cermin kamera nyangkut!
-                        if time.time() - last_frame_time > 3.0:
-                            print("⚠️  Stream terdeteksi membeku. Memaksa putus koneksi...")
-                            break # Keluar paksa agar memicu proses pemulihan di bawah
+                                consecutive_errors = 0
+                            raw = raw[end+2:]  # buang frame yang sudah diproses
 
             except Exception as e:
                 consecutive_errors += 1
                 if consecutive_errors == 1:
-                    print(f"⚠️  Live View mati sementara. Menunggu kamera pulih...")
-                
-                # Coba bangunkan kamera jika sudah beberapa kali diam
-                if consecutive_errors % 3 == 0:
-                    print("⏳ Menembak perintah paksa ke DCC untuk menyalakan Live View...")
-                    try:
-                        urllib.request.urlopen(f"{DCC_HOST}/?CMD=LiveViewWnd_Show", timeout=2)
-                    except Exception:
-                        pass
-
-                time.sleep(1.5)
+                    print(f"⚠️  MJPEG stream belum tersedia: {e}")
+                    print("   → Tekan tombol [Lv] di digiCamControl untuk aktifkan Live View")
+                if consecutive_errors > 5:
+                    print("⏹  Preview berhenti — Live View tidak aktif di DCC")
+                    break
+                time.sleep(2)  # tunggu sebelum retry — jangan spam DCC
                 continue
 
-    preview_thread = threading.Thread(target=preview_loop, daemon=True)
-    preview_thread.start()
+            time.sleep(0.05)
+
+    thread = threading.Thread(target=preview_loop, daemon=True)
+    thread.start()
+    print("▶ Live preview dimulai via HTTP API")
 
 # ─── Template Engine ─────────────────────────────────────────────────────────
 #
@@ -493,51 +503,30 @@ def auto_generate_json_from_png(png_path: str, template_id: str = None,
     return config
 
 
-def apply_template(session_id: str, template_id: str, photo_paths: list) -> dict:
+def apply_template(session_id: str, template_id: str, photo_paths: list) -> str:
     """
-    Gabungkan foto ke dalam template — output Full HD.
-
+    Gabungkan foto ke dalam template.
     Alur:
-      1. Tentukan skala render: minimal 1920px pada sisi terpanjang (Full HD baseline)
-      2. Buka background PNG dari Canva (jika ada) ATAU buat canvas warna solid
-      3. Paste foto ke setiap slot (crop center, support rect/round/rounded-rect)
-      4. Overlay kembali background PNG di atas foto (agar border/dekorasi Canva menutupi)
-      5. Tambah branding tanggal
-      6. Simpan dua file:
-         - grid_{template_id}.jpg  → komposit template sebelum branding (referensi)
-         - result_{template_id}.jpg → final dengan branding (untuk share)
-
-    Return: dict {"grid_path": ..., "result_path": ...}
+      1. Buka background PNG dari Canva (jika ada) ATAU buat canvas warna solid
+      2. Paste foto ke setiap slot (crop center, support rect/round/rounded-rect)
+      3. Overlay kembali background PNG di atas foto (agar border/dekorasi Canva menutupi)
+      4. Tambah branding tanggal
+      5. Simpan hasil
     """
     templates = load_templates_from_disk()
     config = templates.get(template_id)
     if not config:
         raise ValueError(f"Template tidak ditemukan: {template_id}")
 
-    orig_cw, orig_ch = config['canvas_size']
-
-    # ── Hitung skala Full HD ───────────────────────────────────────────────────
-    # Pastikan sisi terpanjang minimal 1920px; jika template sudah lebih besar → pakai aslinya.
-    FULLHD_MIN = 1920
-    scale_fhd  = max(1.0, FULLHD_MIN / max(orig_cw, orig_ch))
-    cw = int(orig_cw * scale_fhd)
-    ch = int(orig_ch * scale_fhd)
-    print(f"🖼  Render canvas: {cw}×{ch}  (skala ×{scale_fhd:.2f} dari template {orig_cw}×{orig_ch})")
-
+    cw, ch   = config['canvas_size']
     bg_color = _hex_to_rgb(config.get('background_color', '#ffffff'))
-    # Scale slots sesuai skala FHD
-    slots_orig = config.get('photo_slots', [])
-    slots = [{
-        **s,
-        'x': int(s['x'] * scale_fhd),
-        'y': int(s['y'] * scale_fhd),
-        'w': int(s['w'] * scale_fhd),
-        'h': int(s['h'] * scale_fhd),
-        'round_radius': int(s.get('round_radius', 0) * scale_fhd),
-    } for s in slots_orig]
+    slots    = config.get('photo_slots', [])
     required = config.get('photo_count', len(slots))
 
     # ── 1. Buat canvas dengan background ──────────────────────────────────────
+    canvas = Image.new('RGBA', (cw, ch), bg_color + (255,))
+
+    # Load background PNG dari Canva (layer bawah — warna dasar)
     bg_img_name = config.get('background_image', '')
     bg_path = ASSETS_TEMPLATES_DIR / bg_img_name if bg_img_name else None
 
@@ -545,17 +534,20 @@ def apply_template(session_id: str, template_id: str, photo_paths: list) -> dict
     if bg_path and bg_path.exists():
         try:
             bg_layer = Image.open(bg_path).convert('RGBA').resize((cw, ch), Image.LANCZOS)
+            # Paste background sebagai layer bawah
+            canvas.alpha_composite(bg_layer)
         except Exception as e:
             print(f"⚠️  Gagal load background image: {e}")
 
     # ── 2. Paste foto ke slot ──────────────────────────────────────────────────
+    # Layer foto ditaruh DI BAWAH overlay PNG — sehingga border/dekorasi Canva
+    # tetap terlihat menutupi tepi foto
     photo_layer = Image.new('RGBA', (cw, ch), (0, 0, 0, 0))
 
     for i, slot in enumerate(slots[:required]):
         if i >= len(photo_paths):
             break
         try:
-            # Buka foto asli resolusi penuh dari kamera — Canon 700D ~5184×3456
             photo = Image.open(photo_paths[i]).convert('RGB')
             photo = _center_crop(photo, slot['w'], slot['h'])
 
@@ -576,31 +568,29 @@ def apply_template(session_id: str, template_id: str, photo_paths: list) -> dict
             print(f"  ⚠️  Slot {i+1} error: {e}")
             _paste_placeholder_rgba(photo_layer, slot, i+1)
 
-    # ── 3. Composite layers ────────────────────────────────────────────────────
+    # Composite: background dulu, lalu foto
+    # Urutkan: bg_color → bg_png (bawah) → foto → bg_png overlay (atas)
     base = Image.new('RGBA', (cw, ch), bg_color + (255,))
     if bg_layer:
         base.alpha_composite(bg_layer)
+
+    # Foto ditempel di atas background
     base.alpha_composite(photo_layer)
+
+    # Overlay PNG lagi di atas foto agar border/teks/dekorasi Canva menutupi foto
     if bg_layer:
-        base.alpha_composite(bg_layer)  # overlay dekorasi Canva di atas foto
+        base.alpha_composite(bg_layer)
 
-    # ── 4. Simpan grid (komposit bersih, tanpa branding) ──────────────────────
-    session_dir  = SESSIONS_DIR / session_id
-    grid_path    = str(session_dir / f"grid_{template_id}.jpg")
-    grid_img     = base.convert('RGB')
-    grid_img.save(grid_path, 'JPEG', quality=98, subsampling=0)
-    print(f"✅ Grid disimpan: {grid_path}  [{cw}×{ch}]")
-
-    # ── 5. Branding + simpan result final ─────────────────────────────────────
-    final = grid_img.copy()
+    # ── 3. Branding ───────────────────────────────────────────────────────────
+    final = base.convert('RGB')
     draw  = ImageDraw.Draw(final)
-    _add_branding_scaled(draw, (cw, ch), config, scale_fhd)
+    _add_branding(draw, (cw, ch), config)
 
-    result_path = str(session_dir / f"result_{template_id}.jpg")
-    final.save(result_path, 'JPEG', quality=98, subsampling=0)
-    print(f"✅ Hasil final disimpan: {result_path}  [{cw}×{ch}]")
-
-    return {"grid_path": grid_path, "result_path": result_path}
+    # ── 4. Simpan ─────────────────────────────────────────────────────────────
+    output_path = str(SESSIONS_DIR / session_id / f"result_{template_id}.jpg")
+    final.save(output_path, 'JPEG', quality=95)
+    print(f"✅ Hasil disimpan: {output_path}")
+    return output_path
 
 
 def generate_thumbnail(template_id: str, config: dict) -> str:
@@ -712,7 +702,6 @@ def _paste_placeholder_rgba(canvas: Image.Image, slot: dict, num: int):
 
 
 def _add_branding(draw, size, config):
-    """Branding teks di resolusi asli template (legacy — dipakai thumbnail)."""
     text  = f"PhotoBox Studio  •  {datetime.now().strftime('%d %b %Y')}"
     try:
         font = ImageFont.truetype(str(FONTS_DIR / 'Quicksand-Bold.ttf'), 24)
@@ -727,31 +716,6 @@ def _add_branding(draw, size, config):
     except:
         tw = len(text)*12
     draw.text(((size[0]-tw)//2, size[1]-38), text, font=font, fill=color)
-
-
-def _add_branding_scaled(draw, size, config, scale: float = 1.0):
-    """
-    Branding teks dengan ukuran font yang sudah discale sesuai resolusi canvas Full HD.
-    Font size minimal 28px di resolusi asli, discale proporsional.
-    """
-    text      = f"PhotoBox Studio  •  {datetime.now().strftime('%d %b %Y')}"
-    font_size = max(28, int(28 * scale))
-    try:
-        font = ImageFont.truetype(str(FONTS_DIR / 'Quicksand-Bold.ttf'), font_size)
-    except:
-        font = ImageFont.load_default()
-    bg    = _hex_to_rgb(config.get('background_color', '#ffffff'))
-    dark  = (bg[0]*0.299 + bg[1]*0.587 + bg[2]*0.114) > 128
-    color = (120,120,120) if dark else (180,180,180)
-    try:
-        bb = draw.textbbox((0,0), text, font=font)
-        tw = bb[2] - bb[0]
-        th = bb[3] - bb[1]
-    except:
-        tw = len(text) * font_size // 2
-        th = font_size
-    margin = int(16 * scale)
-    draw.text(((size[0]-tw)//2, size[1] - th - margin), text, font=font, fill=color)
 
 
 # ─── Google Drive Integration ────────────────────────────────────────────────
@@ -782,12 +746,14 @@ def get_drive_service():
 
 
 def get_or_create_folder(service, folder_name):
-    """Buat atau ambil folder di Google Drive (root My Drive)"""
-    query = f"name='{folder_name}' and mimeType='application/vnd.google-apps.folder' and trashed=false and 'root' in parents"
+    """Buat atau ambil folder di Google Drive"""
+    query = f"name='{folder_name}' and mimeType='application/vnd.google-apps.folder' and trashed=false"
     results = service.files().list(q=query, fields='files(id, name)').execute()
     files = results.get('files', [])
+
     if files:
         return files[0]['id']
+
     folder_metadata = {
         'name': folder_name,
         'mimeType': 'application/vnd.google-apps.folder'
@@ -796,164 +762,42 @@ def get_or_create_folder(service, folder_name):
     return folder['id']
 
 
-def get_or_create_subfolder(service, folder_name: str, parent_id: str) -> str:
-    """Buat atau ambil subfolder di dalam parent folder tertentu."""
-    # Escape tanda kutip tunggal dalam nama folder
-    safe_name = folder_name.replace("'", "\\'")
-    query = (
-        f"name='{safe_name}' "
-        f"and mimeType='application/vnd.google-apps.folder' "
-        f"and trashed=false "
-        f"and '{parent_id}' in parents"
-    )
-    results = service.files().list(q=query, fields='files(id, name)').execute()
-    files = results.get('files', [])
-    if files:
-        return files[0]['id']
-    folder_metadata = {
-        'name': folder_name,
-        'mimeType': 'application/vnd.google-apps.folder',
-        'parents': [parent_id],
-    }
-    folder = service.files().create(body=folder_metadata, fields='id').execute()
-    return folder['id']
+def upload_to_drive(file_path: str, session_id: str) -> dict:
+    """Upload hasil foto ke Google Drive dan kembalikan shareable link"""
+    service, error = get_drive_service()
+    if error:
+        return {"success": False, "error": error}
 
-
-def upload_file_to_drive(service, file_path: str, folder_id: str,
-                          file_name: str = None, mimetype: str = 'image/jpeg') -> dict:
-    """
-    Upload satu file ke folder Drive tertentu.
-    Return dict: {success, file_id, view_url, download_url}
-    """
-    fname = file_name or Path(file_path).name
-    file_metadata = {'name': fname, 'parents': [folder_id]}
-    media = MediaFileUpload(file_path, mimetype=mimetype, resumable=True)
     try:
-        f = service.files().create(
+        folder_id = get_or_create_folder(service, GOOGLE_DRIVE_FOLDER)
+
+        file_name = f"PhotoBox_{session_id}_{datetime.now().strftime('%H%M%S')}.jpg"
+        file_metadata = {
+            'name': file_name,
+            'parents': [folder_id]
+        }
+
+        media = MediaFileUpload(file_path, mimetype='image/jpeg', resumable=True)
+        file = service.files().create(
             body=file_metadata,
             media_body=media,
             fields='id, webViewLink, webContentLink'
         ).execute()
+
+        # Set public permission
         service.permissions().create(
-            fileId=f['id'],
+            fileId=file['id'],
             body={'type': 'anyone', 'role': 'reader'}
         ).execute()
+
+        share_url = file.get('webContentLink', file.get('webViewLink'))
         return {
-            "success":      True,
-            "file_id":      f['id'],
-            "view_url":     f.get('webViewLink'),
-            "download_url": f.get('webContentLink', f.get('webViewLink')),
-        }
-    except Exception as e:
-        return {"success": False, "error": str(e), "file": fname}
-
-
-def upload_session_to_drive(session: dict) -> dict:
-    """
-    Upload semua aset satu sesi ke Google Drive dengan struktur folder:
-
-      PhotoBox Sessions/
-      └── {session_id}/
-          ├── raw/
-          │   ├── photo_1.jpg   ← foto mentah resolusi penuh dari kamera
-          │   ├── photo_2.jpg
-          │   └── ...
-          ├── grid_{template}.jpg   ← komposit template tanpa branding
-          └── result_{template}.jpg ← foto final dengan branding  ← QR Code diarahkan ke ini
-
-    Return: {
-        "success": bool,
-        "folder_url": str,         # URL folder sesi di Drive
-        "result_url": str,         # URL result final (untuk QR)
-        "uploaded_files": [...]
-    }
-    """
-    service, error = get_drive_service()
-    if error:
-        return {"success": False, "error": error}
-
-    session_id  = session['id']
-    session_dir = SESSIONS_DIR / session_id
-
-    try:
-        # ── Buat / ambil struktur folder ──────────────────────────────────────
-        root_folder_id    = get_or_create_folder(service, GOOGLE_DRIVE_FOLDER)
-        session_folder_id = get_or_create_subfolder(service, session_id, root_folder_id)
-        raw_folder_id     = get_or_create_subfolder(service, "raw", session_folder_id)
-
-        uploaded = []
-        result_url = None
-
-        # ── Upload foto mentah ─────────────────────────────────────────────────
-        for raw_path in sorted(session.get('photos', [])):
-            if not os.path.exists(raw_path):
-                continue
-            fname = Path(raw_path).name
-            res = upload_file_to_drive(service, raw_path, raw_folder_id,
-                                       file_name=fname, mimetype='image/jpeg')
-            res['label'] = f"raw/{fname}"
-            uploaded.append(res)
-            status = "✅" if res['success'] else "❌"
-            print(f"  {status} Upload {res['label']}: {res.get('error','ok')}")
-
-        # ── Upload grid (komposit bersih) ─────────────────────────────────────
-        grid_path = session.get('grid_path')
-        if grid_path and os.path.exists(grid_path):
-            fname = Path(grid_path).name
-            res = upload_file_to_drive(service, grid_path, session_folder_id,
-                                       file_name=fname, mimetype='image/jpeg')
-            res['label'] = fname
-            uploaded.append(res)
-            status = "✅" if res['success'] else "❌"
-            print(f"  {status} Upload {res['label']}: {res.get('error','ok')}")
-
-        # ── Upload result final ────────────────────────────────────────────────
-        result_path = session.get('result_path')
-        if result_path and os.path.exists(result_path):
-            fname = Path(result_path).name
-            res = upload_file_to_drive(service, result_path, session_folder_id,
-                                       file_name=fname, mimetype='image/jpeg')
-            res['label'] = fname
-            uploaded.append(res)
-            status = "✅" if res['success'] else "❌"
-            print(f"  {status} Upload {res['label']}: {res.get('error','ok')}")
-            if res['success']:
-                result_url = res['download_url']
-
-        # URL folder sesi di Drive
-        folder_meta = service.files().get(
-            fileId=session_folder_id, fields='webViewLink'
-        ).execute()
-        folder_url = folder_meta.get('webViewLink', '')
-
-        failed = [u for u in uploaded if not u['success']]
-        return {
-            "success":        len(failed) == 0,
-            "partial":        len(failed) > 0 and len(uploaded) > len(failed),
-            "folder_url":     folder_url,
-            "result_url":     result_url,
-            "uploaded_files": uploaded,
-            "errors":         [u['error'] for u in failed],
+            "success": True,
+            "file_id": file['id'],
+            "share_url": share_url,
+            "view_url": file.get('webViewLink')
         }
 
-    except Exception as e:
-        return {"success": False, "error": str(e)}
-
-
-# ── Legacy helper (masih dipakai internal jika perlu) ─────────────────────────
-def upload_to_drive(file_path: str, session_id: str) -> dict:
-    """Upload satu file ke root PhotoBox Sessions/ (legacy — dipertahankan untuk kompatibilitas)."""
-    service, error = get_drive_service()
-    if error:
-        return {"success": False, "error": error}
-    try:
-        folder_id = get_or_create_folder(service, GOOGLE_DRIVE_FOLDER)
-        file_name = f"PhotoBox_{session_id}_{datetime.now().strftime('%H%M%S')}.jpg"
-        res = upload_file_to_drive(service, file_path, folder_id,
-                                   file_name=file_name, mimetype='image/jpeg')
-        # normalise key ke format lama
-        res['share_url'] = res.get('download_url')
-        return res
     except Exception as e:
         return {"success": False, "error": str(e)}
 
@@ -987,10 +831,8 @@ def create_session() -> str:
         "created_at": datetime.now().isoformat(),
         "photos": [],
         "template": None,
-        "grid_path": None,
         "result_path": None,
         "drive_url": None,
-        "drive_result": None,
         "status": "capturing"
     }
 
@@ -1122,7 +964,7 @@ def _create_demo_photo(path: str, index: int) -> bool:
 
 @app.route('/api/session/<session_id>/apply-template', methods=['POST'])
 def api_apply_template(session_id):
-    """Terapkan template dan buat foto gabungan Full HD"""
+    """Terapkan template dan buat foto gabungan"""
     session = load_session(session_id)
     if not session:
         return jsonify({"error": "Session tidak ditemukan"}), 404
@@ -1138,22 +980,19 @@ def api_apply_template(session_id):
         return jsonify({"error": f"Template ini butuh {required} foto, baru ada {len(session['photos'])}"}), 400
 
     try:
-        paths = apply_template(session_id, template_id, session['photos'][:required])
-        # paths = {"grid_path": ..., "result_path": ...}
-        session['template']    = template_id
-        session['grid_path']   = paths['grid_path']
-        session['result_path'] = paths['result_path']
-        session['status']      = 'template_applied'
+        result_path = apply_template(session_id, template_id, session['photos'][:required])
+        session['template'] = template_id
+        session['result_path'] = result_path
+        session['status'] = 'template_applied'
         save_session(session)
 
-        with open(paths['result_path'], 'rb') as f:
+        with open(result_path, 'rb') as f:
             img_data = base64.b64encode(f.read()).decode()
 
         return jsonify({
-            "success":      True,
+            "success": True,
             "result_image": f"data:image/jpeg;base64,{img_data}",
-            "result_path":  paths['result_path'],
-            "grid_path":    paths['grid_path'],
+            "result_path": result_path
         })
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -1161,58 +1000,32 @@ def api_apply_template(session_id):
 
 @app.route('/api/session/<session_id>/upload-drive', methods=['POST'])
 def api_upload_drive(session_id):
-    """
-    Upload semua aset sesi ke Google Drive:
-      - Foto mentah resolusi penuh (folder raw/)
-      - Grid komposit (grid_*.jpg)
-      - Foto final dengan branding (result_*.jpg)
-    QR Code diarahkan ke URL result final.
-    """
+    """Upload hasil ke Google Drive dan buat QR Code"""
     session = load_session(session_id)
-    if not session:
-        return jsonify({"error": "Session tidak ditemukan"}), 404
-    if not session.get('result_path'):
-        return jsonify({"error": "Belum ada hasil foto — terapkan template terlebih dahulu"}), 400
+    if not session or not session.get('result_path'):
+        return jsonify({"error": "Belum ada hasil foto"}), 400
 
-    print(f"☁️  Memulai upload sesi {session_id} ke Google Drive...")
-    result = upload_session_to_drive(session)
+    result = upload_to_drive(session['result_path'], session_id)
 
-    if result.get('success') or result.get('partial'):
-        # Tentukan URL untuk QR: result final jika ada, fallback ke folder
-        qr_target = result.get('result_url') or result.get('folder_url', '')
-
-        # Generate QR Code
+    if result['success']:
+        # Buat QR Code
         qr_path = str(SESSIONS_DIR / session_id / 'qrcode.png')
-        if qr_target:
-            generate_qr_code(qr_target, qr_path)
+        generate_qr_code(result['share_url'], qr_path)
 
-        session['drive_url']    = result.get('folder_url', '')
-        session['drive_result'] = result.get('result_url', '')
-        session['status']       = 'uploaded'
+        session['drive_url'] = result['share_url']
+        session['status'] = 'uploaded'
         save_session(session)
 
-        qr_data = None
-        if os.path.exists(qr_path):
-            with open(qr_path, 'rb') as f:
-                qr_data = base64.b64encode(f.read()).decode()
-
-        uploaded_count = sum(1 for u in result.get('uploaded_files', []) if u.get('success'))
-        total_count    = len(result.get('uploaded_files', []))
+        with open(qr_path, 'rb') as f:
+            qr_data = base64.b64encode(f.read()).decode()
 
         return jsonify({
-            "success":         True,
-            "partial":         result.get('partial', False),
-            "folder_url":      result.get('folder_url'),
-            "result_url":      result.get('result_url'),
-            "drive_url":       result.get('folder_url'),   # kompatibilitas frontend lama
-            "qr_code":         f"data:image/png;base64,{qr_data}" if qr_data else None,
-            "uploaded_count":  uploaded_count,
-            "total_count":     total_count,
-            "message":         f"Berhasil upload {uploaded_count}/{total_count} file",
-            "errors":          result.get('errors', []),
+            "success": True,
+            "drive_url": result['share_url'],
+            "qr_code": f"data:image/png;base64,{qr_data}"
         })
 
-    return jsonify({"success": False, "error": result.get('error', 'Upload gagal')}), 500
+    return jsonify({"success": False, "error": result.get('error')}), 500
 
 
 @app.route('/api/session/<session_id>/print', methods=['POST'])

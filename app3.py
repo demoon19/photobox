@@ -50,8 +50,6 @@ SCOPES = ['https://www.googleapis.com/auth/drive.file']
 camera_connected = False
 current_session = None
 preview_active = False
-preview_thread = None    # Tambahan untuk mencegah tabrakan Live View
-is_capturing = False     # <-- INI YANG MEMBUAT ERROR, pastikan ada di sini!
 
 
 # ─── Kamera Canon via digiCamControl HTTP API ────────────────────────────────
@@ -105,37 +103,67 @@ def check_camera() -> bool:
 
 
 def capture_photo(output_path: str) -> bool:
-    import os
-    import time
-    import glob
-    import shutil
-    import urllib.request
-    
-    global is_capturing
-    # KUNCI GEMBOK DI AWAL
-    is_capturing = True 
+    """
+    Ambil foto via digiCamControl HTTP API.
+    Strategi:
+      1. Panggil /capture via HTTP → DCC trigger kamera
+      2. Cari file JPG terbaru di folder session DCC (dari screenshot: D:/app file/digicamControl)
+      3. Copy ke output_path kita
+    """
+    import glob as _glob, shutil, json as _json
 
     try:
         os.makedirs(os.path.dirname(output_path), exist_ok=True)
-        print(f"📸 Trigger capture via HTTP API (/?CMD=Capture)...")
+        print(f"📸 Trigger capture via HTTP...")
+
+        # Catat waktu sebelum capture untuk filter file baru
         capture_time = time.time()
 
-        try:
-            urllib.request.urlopen(f"{DCC_HOST}/?CMD=Capture", timeout=3)
-            print("   [Info] Perintah capture terkirim.")
-        except Exception:
-            pass
+        # Trigger capture via HTTP API digiCamControl
+        # DCC web API endpoint untuk capture: GET /capture
+        # Ref: http://digicamcontrol.com/doc/serverapi
+        triggered = False
+        for capture_endpoint in ["/capture", "/?CMD=Capture", "/session/capture"]:
+            try:
+                print(f"   Trigger capture: {DCC_HOST}{capture_endpoint}")
+                data, status = dcc_get(capture_endpoint, timeout=30)
+                print(f"   Response ({status}): {data[:150]}")
+                triggered = True
+                break
+            except Exception as e:
+                print(f"   Endpoint {capture_endpoint} gagal: {e}")
+                continue
 
-        dcc_base = os.path.join("D:\\", "app file", "digicamControl", "foto")
-        start_poll = time.time()
-        
-        while (time.time() - start_poll) < 12.0:
-            newest_file = None
-            newest_mtime = capture_time - 1
+        if not triggered:
+            print("❌ Semua endpoint capture gagal")
+            print("   Pastikan digiCamControl terbuka dan web server aktif di port 5513")
 
-            if os.path.exists(dcc_base):
-                for f in glob.glob(os.path.join(dcc_base, "**", "*.jpg"), recursive=True):
-                    if "_prev" in f.lower() or "thumb" in f.lower(): continue
+        # Tunggu kamera selesai menulis file (shutter + transfer)
+        print("   Menunggu kamera selesai...")
+        time.sleep(3)
+
+        # Folder penyimpanan DCC sudah terkonfirmasi dari CMD:
+        # D:/app file/digicamControl/DSC_XXXX.JPG
+        dcc_base = os.path.join("D:/", "app file", "digicamControl", "foto")
+        search_dirs = [dcc_base]
+
+        # Tambah subfolder jika ada
+        if os.path.exists(dcc_base):
+            for sub in os.listdir(dcc_base):
+                subpath = os.path.join(dcc_base, sub)
+                if os.path.isdir(subpath):
+                    search_dirs.append(subpath)
+
+        print(f"   Mencari file baru di {len(search_dirs)} folder...")
+
+        newest_file = None
+        newest_mtime = capture_time - 2  # toleransi 2 detik sebelum capture
+
+        for d in search_dirs:
+            if not os.path.exists(d):
+                continue
+            for ext in ["*.jpg", "*.JPG", "*.jpeg", "*.JPEG"]:
+                for f in _glob.glob(os.path.join(d, "**", ext), recursive=True):
                     try:
                         mtime = os.path.getmtime(f)
                         if mtime > newest_mtime:
@@ -144,109 +172,97 @@ def capture_photo(output_path: str) -> bool:
                     except Exception:
                         pass
 
-            if newest_file and newest_mtime >= capture_time:
-                time.sleep(0.5) 
-                try:
-                    shutil.copy2(newest_file, output_path)
-                    if os.path.getsize(output_path) > 100000:
-                        print(f"✅ Foto resolusi tinggi berhasil diamankan: {newest_file}")
-                        time.sleep(2.0)
-                        
-                        # === BUKA GEMBOK DI SINI ===
-                        is_capturing = False 
-                        return True
-                except PermissionError:
-                    pass
+        if newest_file:
+            # Salin file asli kamera — resolusi penuh, tidak ada resize
+            # Canon 700D menghasilkan JPEG 5184×3456 (≈18MP / ~6MB per file)
+            shutil.copy2(newest_file, output_path)
+            try:
+                _img_info = Image.open(output_path)
+                print(f"✅ Foto berhasil: {newest_file}  [{_img_info.width}×{_img_info.height}]")
+            except Exception:
+                print(f"✅ Foto berhasil: {newest_file}")
+            return True
 
-            time.sleep(0.5)
+        # Terakhir: coba download snapshot dari live view sebagai fallback
+        print("   Mencoba fallback snapshot dari live view...")
+        try:
+            snap_data, _ = dcc_get("/liveview.jpg", timeout=5)
+            if snap_data and len(snap_data) > 5000:
+                with open(output_path, 'wb') as f:
+                    f.write(snap_data)
+                print("✅ Fallback snapshot dari live view berhasil")
+                return True
+        except Exception:
+            pass
 
-        # === BUKA GEMBOK JIKA GAGAL/TIMEOUT ===
-        is_capturing = False
+        print("❌ Capture gagal. Cek:")
+        print(f"   - Folder DCC: {dcc_base}")
+        print("   - Pastikan Image Quality = JPEG (bukan RAW)")
+        print("   - Pastikan kamera tidak sleep")
         return False
 
     except Exception as e:
         print(f"Capture error tak terduga: {e}")
-        # === BUKA GEMBOK JIKA TERJADI ERROR ===
-        is_capturing = False
         return False
 
 
-# Tambahkan variabel global ini tepat di bawah 'preview_active = False' (sekitar baris 49)
-preview_thread = None
-
-def stop_live_preview():
-    """Menghentikan loop Live View dengan aman."""
-    global preview_active
-    preview_active = False
-    is_capturing = False
-    print("⏹ Perintah stop Live View diterima.")
-
 def start_live_preview():
-    global preview_active, preview_thread, is_capturing
-
-    if preview_active and preview_thread and preview_thread.is_alive():
-        return
-
+    """
+    Live preview via digiCamControl HTTP API.
+    Endpoint: GET /liveview.jpg  → mengembalikan JPEG frame langsung.
+    Ini sangat cepat dan reliable karena tidak perlu subprocess.
+    """
+    global preview_active
     preview_active = True
 
     def preview_loop():
-        print("▶ Preview loop dimulai...")
+        """
+        Live preview via MJPEG stream port 5514.
+        MJPEG stream hanya aktif saat Live View sudah dinyalakan di DCC.
+        Tidak ada fallback ke /liveview.jpg agar DCC tidak crash.
+        """
         consecutive_errors = 0
+        print("▶ Preview loop dimulai — menunggu MJPEG stream dari DCC...")
 
         while preview_active:
-            if is_capturing:
-                time.sleep(1)
-                continue
-
             try:
                 req = urllib.request.Request(MJPEG_URL)
-                with urllib.request.urlopen(req, timeout=3) as resp:
+                with urllib.request.urlopen(req, timeout=5) as resp:
                     raw = b""
-                    consecutive_errors = 0
-                    last_frame_time = time.time() # Mulai timer Watchdog
-                    
-                    while preview_active and not is_capturing:
+                    while preview_active:
                         chunk = resp.read(4096)
                         if not chunk:
                             break
                         raw += chunk
-                        
+                        # Cari frame JPEG lengkap
                         start = raw.find(b'\xff\xd8')
                         end   = raw.find(b'\xff\xd9')
                         if start != -1 and end != -1 and end > start:
                             jpeg = raw[start:end+2]
-                            if len(jpeg) > 1000: 
+                            if len(jpeg) > 1000:  # frame valid
                                 img_b64 = base64.b64encode(jpeg).decode()
                                 socketio.emit('preview_frame', {
                                     'image': f'data:image/jpeg;base64,{img_b64}'
                                 })
-                                last_frame_time = time.time() # Reset timer karena video lancar
-                            raw = raw[end+2:]
-
-                        # === WATCHDOG TIMER ===
-                        # Jika 3 detik tidak ada video baru, berarti cermin kamera nyangkut!
-                        if time.time() - last_frame_time > 3.0:
-                            print("⚠️  Stream terdeteksi membeku. Memaksa putus koneksi...")
-                            break # Keluar paksa agar memicu proses pemulihan di bawah
+                                consecutive_errors = 0
+                            raw = raw[end+2:]  # buang frame yang sudah diproses
 
             except Exception as e:
                 consecutive_errors += 1
                 if consecutive_errors == 1:
-                    print(f"⚠️  Live View mati sementara. Menunggu kamera pulih...")
-                
-                # Coba bangunkan kamera jika sudah beberapa kali diam
-                if consecutive_errors % 3 == 0:
-                    print("⏳ Menembak perintah paksa ke DCC untuk menyalakan Live View...")
-                    try:
-                        urllib.request.urlopen(f"{DCC_HOST}/?CMD=LiveViewWnd_Show", timeout=2)
-                    except Exception:
-                        pass
-
-                time.sleep(1.5)
+                    print(f"⚠️  MJPEG stream belum tersedia: {e}")
+                    print("   → Tekan tombol [Lv] di digiCamControl untuk aktifkan Live View")
+                if consecutive_errors > 5:
+                    print("⏹  Preview berhenti — Live View tidak aktif di DCC")
+                    break
+                time.sleep(2)  # tunggu sebelum retry — jangan spam DCC
                 continue
 
-    preview_thread = threading.Thread(target=preview_loop, daemon=True)
-    preview_thread.start()
+            time.sleep(0.05)
+
+    thread = threading.Thread(target=preview_loop, daemon=True)
+    thread.start()
+    print("▶ Live preview dimulai via HTTP API")
 
 # ─── Template Engine ─────────────────────────────────────────────────────────
 #
