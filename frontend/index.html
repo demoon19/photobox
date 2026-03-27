@@ -763,7 +763,7 @@ function buildThumbStrip(tpl){
   const strip = document.getElementById('thumb-strip');
   const slots = tpl.photo_slots || [];
   strip.innerHTML = slots.map((slot, i) => `
-    <div class="thumb-item" id="ti${i+1}">
+    <div class="thumb-item" id="ti${i+1}" onclick="prepRetake(${i+1})" style="cursor:pointer" title="Klik untuk mengulang foto ke-${i+1}">
       <div class="thumb-num">${i+1}</div>
       <div style="width:48px;height:36px;border-radius:4px;
         background:var(--border);flex-shrink:0;overflow:hidden;
@@ -775,60 +775,80 @@ function buildThumbStrip(tpl){
   `).join('');
 }
 
+// FUNGSI BARU: Menyiapkan mode Retake
+function prepRetake(slotNum) {
+  // Hanya izinkan retake jika foto di slot tersebut sudah pernah diambil
+  if (!S.sid || slotNum > S.n || S.busy) return; 
+  
+  S.retakeIdx = slotNum; // Set state sedang retake
+  updateCounter();       // Ubah tulisan tombol
+  startPrev();           // Pindahkan cermin live view ke kotak yang dipilih
+}
+
 function updateCounter(){
   const txt = `${S.n} / ${S.required}`;
   document.getElementById('scounter').textContent = txt;
   document.getElementById('plbl').textContent = txt + ' foto diambil';
   document.getElementById('pf').style.width = (S.required>0 ? S.n/S.required*100 : 0)+'%';
-  const rem = S.required - S.n;
-  document.getElementById('caplbl').textContent =
-    S.n===0 ? 'Mulai & Ambil Foto' :
-    rem>0   ? `Ambil Foto (${rem} tersisa)` : 'Semua Foto ✓';
+  
+  // Ubah teks tombol secara cerdas
+  const btnLbl = document.getElementById('caplbl');
+  if (S.retakeIdx) {
+     btnLbl.textContent = `Retake Foto ${S.retakeIdx}`;
+  } else {
+     const rem = S.required - S.n;
+     if (S.n === 0) btnLbl.textContent = 'Mulai & Ambil Foto';
+     else if (rem > 0) btnLbl.textContent = `Ambil Foto (${rem} tersisa)`;
+     else btnLbl.textContent = '✨ Selesai & Proses Template';
+  }
 }
 
 // ── Preview — masuk ke slot aktif dalam template ──────────────────────────────
 let liveEl = null;  // elemen img MJPEG yang berjalan di dalam slot
 
-function startPrev(){
-  // Cari slot aktif berikutnya
-  const nextIdx = S.n; 
+function startPrev() {
+  // Jika sedang mode retake, arahkan ke kotak retake. Jika tidak, ke kotak selanjutnya.
+  const targetIdx = S.retakeIdx ? (S.retakeIdx - 1) : S.n; 
   const slots = S.tplData ? (S.tplData.photo_slots || []) : [];
-  if(nextIdx >= slots.length) return;
+  if (targetIdx >= slots.length) return;
 
-  const slotEl = document.getElementById(`tslot${nextIdx+1}`);
-  if(!slotEl) return;
+  const slotEl = document.getElementById(`tslot${targetIdx+1}`);
+  if (!slotEl) return;
 
-  // Hapus live preview lama
   stopPrev(false);
 
-  // Buat elemen img MJPEG baru
   liveEl = document.createElement('img');
   liveEl.id = 'live-preview-vid';
   
-  // Tembak URL stream kamera
-  liveEl.src = MJPEG + '?t=' + Date.now();
-  liveEl.style.cssText = 'position:absolute;inset:0;width:100%;height:100%;object-fit:cover;z-index:1';
-  
-  // ========================================================
-  // KUNCI 2: AUTO-REFRESH! Jika kamera belum siap (cermin masih proses naik), 
-  // browser tidak akan blank, melainkan mencoba terus!
-  // ========================================================
-  liveEl.onerror = () => {
-    liveEl.src = ''; // Bersihkan gambar rusak
-    setTimeout(() => { 
-        startPrev(); 
-    }, 500); // Coba lagi setengah detik kemudian
+  liveEl.onerror = function() {
+    liveEl.onerror = null; 
+    liveEl.src = ''; 
+    setTimeout(() => { startPrev(); }, 1000); 
   };
 
-  // Sembunyikan placeholder slot
+  liveEl.src = MJPEG + '?t=' + Date.now();
+  liveEl.style.cssText = 'position:absolute;inset:0;width:100%;height:100%;object-fit:cover;z-index:1';
+
+  // Sembunyikan placeholder tulisan
   const ph = slotEl.querySelector('.slot-empty-ph');
-  if(ph) ph.style.display = 'none';
+  if (ph) ph.style.display = 'none';
+
+  // Sembunyikan foto hasil jepretan sebelumnya jika sedang mode retake
+  const resImg = slotEl.querySelector('.result-img');
+  if (resImg) resImg.style.display = 'none';
 
   slotEl.appendChild(liveEl);
+  
+  // Update efek kotak menyala
+  document.querySelectorAll('.tpl-slot').forEach(s => s.classList.remove('active-slot'));
   slotEl.classList.add('active-slot');
 
+  document.querySelectorAll('.thumb-item').forEach(t => t.classList.remove('active'));
+  const ti = document.getElementById(`ti${targetIdx+1}`);
+  if(ti) ti.classList.add('active');
+
   document.getElementById('btn-prev-start').textContent = '🔄 Refresh Preview';
-  fetch(`${API}/camera/preview/start`,{method:'POST'}).catch(()=>{});
+  fetch(`${API}/camera/preview/start`, {method: 'POST'}).catch(() => {});
 }
 
 function stopPrev(notify=true){
@@ -850,7 +870,14 @@ function vfErr(){ /* tidak dipakai lagi */ }
 
 // ── Capture ────────────────────────────────────────────────────────────────────
 async function doCapture(){
-  if(S.busy||S.n>=S.required) return;
+  if(S.busy) return;
+  
+  // KUNCI: Jika foto sudah lengkap dan BUKAN retake, eksekusi proses hasil (pindah ke panel 3)
+  if(S.n >= S.required && !S.retakeIdx) {
+      processResult();
+      return;
+  }
+
   S.busy=true;
 
   if(!S.sid){
@@ -864,82 +891,97 @@ async function doCapture(){
 
   await countdown(); 
   doFlash();
-
-  // KUNCI 1: Matikan Live View SEBELUM fetch agar kamera tidak "ditarik" dua arah
   stopPrev(false);
 
   const btn=document.getElementById('capbtn');
   btn.disabled=true;
   document.getElementById('caplbl').textContent='Mengambil foto...';
-  hlSlot(S.n+1);
 
   try{
-    // PERBAIKAN: URL endpoint yang benar sesuai app.py
-    const d=await(await fetch(`${API}/session/${S.sid}/capture`,{method:'POST'})).json();
+    // Tambahkan indikator retake jika ada
+    const payload = { session_id: S.sid, photo_index: S.n };
+    if (S.retakeIdx) payload.retake_index = S.retakeIdx;
+
+    const res = await fetch(`${API}/session/${S.sid}/capture`, {
+        method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body: JSON.stringify(payload)
+    });
+
+    const d = await res.json();
 
     if(d.success){
-      S.n=d.total;
+      // Hanya maju hitungannya jika ini bukan retake
+      if (!S.retakeIdx) S.n = d.total; 
       
-      // Fungsi fillSlot bawaan Anda sudah otomatis memanggil startPrev() 
-      // untuk kotak foto selanjutnya
       fillSlot(d.photo_index, d.thumbnail);
+      toast(S.retakeIdx ? `✅ Retake Foto ${d.photo_index} berhasil!` : `✅ Foto ${d.photo_index} berhasil!`,'ok');
+      
+      S.retakeIdx = null; // Reset status retake
       updateCounter();
-      toast(`✅ Foto ${d.photo_index} berhasil!`,'ok');
 
-      if(S.n>=S.required) setTimeout(processResult,800);
-    }else{ 
+      setTimeout(() => {
+        if (S.n < S.required) {
+           startPrev(); // Maju otomatis ke foto selanjutnya
+        } else {
+           stopPrev(false); // Semua foto lengkap, layar akan diam menanti user klik Selesai atau klik retake
+        }
+      }, 500);
+
+    } else { 
       toast('Gagal: '+(d.error||'?'),'err'); 
-      startPrev(); // Tetap nyalakan Live View jika gagal
+      startPrev(); 
     }
-  }catch(e){ 
+  } catch(e) { 
     toast('Koneksi error','err'); 
-    startPrev(); // Tetap nyalakan Live View jika gagal
+    startPrev(); 
   }
 
-  clrSlot(); 
   btn.disabled=false; 
-  updateCounter(); 
   S.busy=false;
 }
 
+function freezePreview() {
+  const targetIdx = S.retakeIdx ? (S.retakeIdx - 1) : S.n;
+  const slotEl = document.getElementById(`tslot${targetIdx+1}`);
+  if (!slotEl) return;
+
+  const frozenImg = document.createElement('img');
+  // Minta gambar statis dari Python
+  frozenImg.src = `${API}/camera/snapshot?t=${Date.now()}`;
+  frozenImg.className = 'frozen-img';
+  frozenImg.style.cssText = 'position:absolute;inset:0;width:100%;height:100%;object-fit:cover;z-index:2;';
+  slotEl.appendChild(frozenImg);
+}
+
 function fillSlot(i, thumb){
-  // Isi slot di template canvas
   const slotEl = document.getElementById(`tslot${i}`);
   if(slotEl){
-    // Hapus live preview & placeholder
+    const oldImg = slotEl.querySelector('.result-img');
+    if(oldImg) oldImg.remove(); 
+
+    // Hapus frame yang dibekukan tadi
+    const frozen = slotEl.querySelectorAll('.frozen-img');
+    frozen.forEach(f => f.remove());
+
     stopPrev(false);
     slotEl.classList.remove('active-slot');
     const ph = slotEl.querySelector('.slot-empty-ph');
     if(ph) ph.remove();
 
-    // Tambah foto hasil
     const img = document.createElement('img');
     img.src = thumb;
+    img.className = 'result-img'; 
     img.style.cssText = 'position:absolute;inset:0;width:100%;height:100%;object-fit:cover';
     slotEl.appendChild(img);
   }
 
-  // Update thumbnail strip
   const tthumb = document.getElementById(`tthumb${i}`);
-  if(tthumb){
-    tthumb.innerHTML = `<img src="${thumb}" style="width:100%;height:100%;object-fit:cover"/>`;
-  }
+  if(tthumb) { tthumb.innerHTML = `<img src="${thumb}" style="width:100%;height:100%;object-fit:cover"/>`; }
   const tlbl = document.getElementById(`tlbl${i}`);
-  if(tlbl){ tlbl.textContent = `Foto ${i} ✓`; tlbl.style.color='var(--success)'; }
+  if(tlbl) { tlbl.textContent = `Foto ${i} ✓`; tlbl.style.color='var(--success)'; }
   const ti = document.getElementById(`ti${i}`);
-  if(ti){ ti.classList.add('filled'); ti.classList.remove('active'); }
-
-  // Aktifkan preview di slot berikutnya
-  const nextSlot = i + 1;
-  const totalSlots = S.tplData?.photo_slots?.length || 0;
-  if(nextSlot <= totalSlots){
-    setTimeout(()=>{
-      // Tandai slot berikutnya sebagai aktif di strip
-      const tiNext = document.getElementById(`ti${nextSlot}`);
-      if(tiNext) tiNext.classList.add('active');
-      startPrev(); // mulai preview di slot berikutnya
-    }, 300);
-  }
+  if(ti) { ti.classList.add('filled'); ti.classList.remove('active'); }
 }
 
 function hlSlot(i){
@@ -989,7 +1031,7 @@ async function printFoto(){
 }
 
 function resetSesi(){
-  S.sid=null; S.n=0;
+  S.sid=null; S.n=0; S.retakeIdx=null; // Reset retake index
   stopPrev(false);
   if(S.tplData) buildTemplateCanvas(S.tplData);
   updateCounter();
@@ -1020,6 +1062,10 @@ async function countdown(){
   for(let i=3;i>=1;i--){
     n.textContent=i; n.style.animation='none'; n.offsetHeight;
     n.style.animation='cdpop 1s ease-in-out';
+    
+    // SIHIRNYA DI SINI: Curi gambar statis tepat saat angka 1 muncul!
+    if(i === 1) freezePreview();
+
     await new Promise(r=>setTimeout(r,1000));
   }
   ov.classList.remove('show');

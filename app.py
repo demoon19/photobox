@@ -1018,23 +1018,40 @@ def api_session_start():
 
 @app.route('/api/session/<session_id>/capture', methods=['POST'])
 def api_capture(session_id):
-    """Ambil 1 foto, dipanggil 4x per sesi"""
+    """Ambil 1 foto, atau retake foto spesifik"""
     session = load_session(session_id)
     if not session:
         return jsonify({"error": "Session tidak ditemukan"}), 404
 
-    photo_index = len(session['photos']) + 1
+    data = request.json or {}
+    # Ambil index retake dari request jika ada
+    retake_index = data.get('retake_index')
+
+    if retake_index is not None:
+        photo_index = int(retake_index)
+    else:
+        photo_index = len(session['photos']) + 1
+
     photo_path = str(SESSIONS_DIR / session_id / 'photos' / f'photo_{photo_index}.jpg')
 
     # Coba capture dari kamera, fallback ke demo mode
     if check_camera():
         success = capture_photo(photo_path)
     else:
-        # Demo mode: buat placeholder berwarna
         success = _create_demo_photo(photo_path, photo_index)
 
     if success:
-        session['photos'].append(photo_path)
+        # Jika bukan retake, tambahkan ke list
+        if retake_index is None:
+            session['photos'].append(photo_path)
+        else:
+            # Jika retake, timpa (replace) urutan yang lama
+            idx = photo_index - 1
+            if idx < len(session['photos']):
+                session['photos'][idx] = photo_path
+            else:
+                session['photos'].append(photo_path)
+
         save_session(session)
 
         # Kirim thumbnail ke frontend
@@ -1366,6 +1383,21 @@ def on_start_preview():
 @socketio.on('stop_preview')
 def on_stop_preview():
     stop_live_preview()
+
+@app.route('/api/camera/snapshot')
+def api_camera_snapshot():
+    """Mengambil 1 frame statis dari live view untuk dibekukan di frontend"""
+    import urllib.request
+    import io
+    from flask import send_file
+    try:
+        # Tembak API bawaan digiCamControl untuk minta 1 gambar statis
+        req = urllib.request.Request(f"{DCC_HOST}/liveview.jpg")
+        with urllib.request.urlopen(req, timeout=1) as resp:
+            return send_file(io.BytesIO(resp.read()), mimetype='image/jpeg')
+    except Exception:
+        # Jika gagal, kembalikan gambar transparan agar web tidak error
+        return send_file(io.BytesIO(b'\x47\x49\x46\x38\x39\x61\x01\x00\x01\x00\x80\x00\x00\xff\xff\xff\x00\x00\x00\x21\xf9\x04\x01\x00\x00\x00\x00\x2c\x00\x00\x00\x00\x01\x00\x01\x00\x00\x02\x02\x44\x01\x00\x3b'), mimetype='image/gif')
 
 
 # ─── Main ─────────────────────────────────────────────────────────────────────
