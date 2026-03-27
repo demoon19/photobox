@@ -803,6 +803,54 @@ function updateCounter(){
   }
 }
 
+let liveRecorder = null;
+let liveChunks = [];
+let liveInterval = null;
+
+function startVideoRecord() {
+  const img = document.getElementById('live-preview-vid');
+  if (!img) return;
+
+  // Buat kanvas rahasia untuk menjiplak gambar video
+  const canvas = document.createElement('canvas');
+  canvas.width = img.clientWidth || 600;
+  canvas.height = img.clientHeight || 800;
+  const ctx = canvas.getContext('2d');
+
+  // Jiplak gambar 15x dalam sedetik (15 FPS)
+  liveInterval = setInterval(() => {
+    try { ctx.drawImage(img, 0, 0, canvas.width, canvas.height); } catch(e){}
+  }, 1000/15);
+
+  const stream = canvas.captureStream(15);
+  liveRecorder = new MediaRecorder(stream, { mimeType: 'video/webm' });
+  liveChunks = [];
+  liveRecorder.ondataavailable = e => { if (e.data.size > 0) liveChunks.push(e.data); };
+  liveRecorder.start();
+}
+
+async function stopAndUploadVideo(photoIndex) {
+  return new Promise(resolve => {
+    if (!liveRecorder || liveRecorder.state === 'inactive') return resolve();
+    
+    liveRecorder.onstop = async () => {
+      clearInterval(liveInterval);
+      const blob = new Blob(liveChunks, { type: 'video/webm' });
+      
+      // Kirim video WebM ke server Python
+      const fd = new FormData();
+      fd.append('video', blob, `vid_${photoIndex}.webm`);
+      fd.append('photo_index', photoIndex);
+      
+      try {
+        await fetch(`${API}/session/${S.sid}/upload_video`, { method: 'POST', body: fd });
+      } catch (e) { console.error("Gagal upload video", e); }
+      resolve();
+    };
+    liveRecorder.stop();
+  });
+}
+
 // ── Preview — masuk ke slot aktif dalam template ──────────────────────────────
 let liveEl = null;  // elemen img MJPEG yang berjalan di dalam slot
 
@@ -871,13 +919,10 @@ function vfErr(){ /* tidak dipakai lagi */ }
 // ── Capture ────────────────────────────────────────────────────────────────────
 async function doCapture(){
   if(S.busy) return;
-  
-  // KUNCI: Jika foto sudah lengkap dan BUKAN retake, eksekusi proses hasil (pindah ke panel 3)
   if(S.n >= S.required && !S.retakeIdx) {
       processResult();
       return;
   }
-
   S.busy=true;
 
   if(!S.sid){
@@ -889,6 +934,18 @@ async function doCapture(){
     }catch(e){toast('Gagal buat sesi','err');S.busy=false;return;}
   }
 
+  // ==========================================
+  // KUNCI BARU: Mulai merekam gaya mereka!
+  // ==========================================
+  startVideoRecord();
+
+  const targetIndex = S.retakeIdx ? S.retakeIdx : (S.n + 1);
+  fetch(`${API}/session/${S.sid}/start_record`, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({photo_index: targetIndex})
+  }).catch(()=>{});
+  
   await countdown(); 
   doFlash();
   stopPrev(false);
@@ -898,7 +955,6 @@ async function doCapture(){
   document.getElementById('caplbl').textContent='Mengambil foto...';
 
   try{
-    // Tambahkan indikator retake jika ada
     const payload = { session_id: S.sid, photo_index: S.n };
     if (S.retakeIdx) payload.retake_index = S.retakeIdx;
 
@@ -911,21 +967,24 @@ async function doCapture(){
     const d = await res.json();
 
     if(d.success){
-      // Hanya maju hitungannya jika ini bukan retake
       if (!S.retakeIdx) S.n = d.total; 
+      
+      // ==========================================
+      // KUNCI BARU: Hentikan rekaman dan upload ke Python
+      // Video akan berhenti TEPAT SAAT foto aslinya berhasil ditangkap!
+      // ==========================================
+      document.getElementById('caplbl').textContent='Menyimpan klip video...';
+      await stopAndUploadVideo(d.photo_index);
       
       fillSlot(d.photo_index, d.thumbnail);
       toast(S.retakeIdx ? `✅ Retake Foto ${d.photo_index} berhasil!` : `✅ Foto ${d.photo_index} berhasil!`,'ok');
       
-      S.retakeIdx = null; // Reset status retake
+      S.retakeIdx = null; 
       updateCounter();
 
       setTimeout(() => {
-        if (S.n < S.required) {
-           startPrev(); // Maju otomatis ke foto selanjutnya
-        } else {
-           stopPrev(false); // Semua foto lengkap, layar akan diam menanti user klik Selesai atau klik retake
-        }
+        if (S.n < S.required) startPrev(); 
+        else stopPrev(false); 
       }, 500);
 
     } else { 
@@ -936,7 +995,6 @@ async function doCapture(){
     toast('Koneksi error','err'); 
     startPrev(); 
   }
-
   btn.disabled=false; 
   S.busy=false;
 }
@@ -1001,9 +1059,39 @@ async function processResult(){
       method:'POST',headers:{'Content-Type':'application/json'},
       body:JSON.stringify({template_id:S.tpl})
     })).json();
+    
     if(d.success){
-      document.getElementById('resimg').innerHTML=`<img src="${d.result_image}" alt="Hasil"/>`;
-      toast('✨ Foto selesai!','ok');
+      // Tampilkan video jika berhasil dibuat!
+      // 2. RADAR VIDEO PINTAR: Mengecek status ke Python
+      if(d.video_url) {
+          const checkVid = setInterval(async () => {
+              try {
+                  // Tanya ke Python: "Gimana status video sesi ini?"
+                  const statRes = await fetch(`${API}/session/${S.sid}/status`);
+                  const statData = await statRes.json();
+                  
+                  if(statData.video_status === 'ready') {
+                      // Jika sukses, matikan radar & tampilkan video
+                      clearInterval(checkVid); 
+                      resImg.innerHTML = `<video src="${d.video_url}?t=${Date.now()}" autoplay loop muted style="max-width:100%;max-height:70vh;border-radius:14px;box-shadow:0 8px 30px rgba(0,0,0,0.5);"></video>`;
+                      toast('🎥 Live Video Siap!','ok');
+                      
+                  } else if(statData.video_status === 'error') {
+                      // Jika Python melapor error, matikan radar & beritahu pengguna
+                      clearInterval(checkVid);
+                      const statusTxt = document.getElementById('vid-status');
+                      if(statusTxt) {
+                          statusTxt.innerHTML = '⚠️ <i>Maaf, Live Video gagal diproses. Menampilkan foto statis.</i>';
+                          statusTxt.style.color = 'var(--err)'; // Beri warna merah/error
+                          statusTxt.style.animation = 'none';   // Matikan efek kelap-kelip
+                      }
+                      toast('Gagal memproses video klip','err');
+                  }
+                  // Jika status masih 'processing', biarkan radar terus berputar
+              } catch(e) {}
+          }, 2000); // Cek setiap 2 detik
+      }
+      toast('✨ Foto & Video Live selesai!','ok');
     }else{ toast('Template gagal: '+d.error,'err'); }
   }catch(e){ toast('Error server','err'); }
 }

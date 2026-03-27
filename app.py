@@ -1082,45 +1082,256 @@ def _create_demo_photo(path: str, index: int) -> bool:
     img.save(path, 'JPEG', quality=90)
     return True
 
+@app.route('/api/session/<session_id>/upload_video', methods=['POST'])
+def api_upload_video(session_id):
+    """Menerima kiriman klip video dari browser"""
+    if 'video' not in request.files:
+        return jsonify({"error": "No video file"}), 400
+    
+    file = request.files['video']
+    photo_index = request.form.get('photo_index', '1')
+    save_path = SESSIONS_DIR / session_id / f'vid_{photo_index}.webm'
+    file.save(str(save_path))
+    return jsonify({"success": True})
+
+
+def apply_video_template(session_id: str, template_id: str) -> str:
+    """Menggabungkan potongan video ke dalam template menggunakan FFmpeg."""
+    templates = load_templates_from_disk()
+    config = templates.get(template_id)
+    session_dir = SESSIONS_DIR / session_id
+
+    orig_cw, orig_ch = config['canvas_size']
+    # Kita rendahkan sedikit resolusinya agar rendering FFmpeg secepat kilat (lebar 1080px)
+    scale = max(1.0, 1080 / max(orig_cw, orig_ch))
+    cw, ch = int(orig_cw * scale), int(orig_ch * scale)
+    
+    bg_color = config.get('background_color', '#ffffff').replace('#', '')
+    slots = config.get('photo_slots', [])
+    required = config.get('photo_count', len(slots))
+
+    out_path = str(session_dir / f"live_result_{template_id}.mp4")
+
+    # Siapkan perintah FFmpeg
+    cmd = ['ffmpeg.exe', '-y']
+    
+    # Input 0: Background Polos
+    cmd.extend(['-f', 'lavfi', '-i', f'color=c=0x{bg_color}:s={cw}x{ch}'])
+
+    # Input 1 sampai N: Klip Video (.mp4)
+    for i in range(required):
+        vid_path = session_dir / f"vid_{i+1}.mp4"
+        if vid_path.exists():
+            cmd.extend(['-i', str(vid_path)])
+        else:
+            # Fallback jika video gagal direkam: pakai foto statis
+            img_path = session_dir / 'photos' / f'photo_{i+1}.jpg'
+            cmd.extend(['-loop', '1', '-t', '7', '-i', str(img_path)])
+
+    # Input N+1: Template Overlay (PNG Canva)
+    bg_path = ASSETS_TEMPLATES_DIR / config.get('background_image', '')
+    has_bg = bg_path.exists()
+    if has_bg:
+        cmd.extend(['-i', str(bg_path)])
+
+    # Rangkai Filter FFmpeg (Sihir Compositing)
+    filter_str = ""
+    last_ov = "0:v"
+    
+    for i, slot in enumerate(slots[:required]):
+        sw, sh = int(slot['w'] * scale), int(slot['h'] * scale)
+        sx, sy = int(slot['x'] * scale), int(slot['y'] * scale)
+        
+        # Scale, crop, lalu tempel di atas kanvas
+        filter_str += f"[{i+1}:v]scale={sw}:{sh}:force_original_aspect_ratio=increase,crop={sw}:{sh}[v{i+1}]; "
+        # eof_action=pass membuat video membeku di frame terakhir ketika durasinya habis
+        filter_str += f"[{last_ov}][v{i+1}]overlay={sx}:{sy}:eof_action=pass[ov{i+1}]; "
+        last_ov = f"ov{i+1}"
+
+    if has_bg:
+        bg_idx = required + 1
+        filter_str += f"[{bg_idx}:v]scale={cw}:{ch}[fg]; "
+        filter_str += f"[{last_ov}][fg]overlay=0:0[out]"
+        last_ov = "out"
+    else:
+        filter_str += f"[{last_ov}]copy[out]"
+
+    # Eksekusi! -t 7 mengunci durasi hasil akhir persis 7 Detik.
+    cmd.extend([
+        '-filter_complex', filter_str, 
+        '-map', f'[{last_ov}]', 
+        '-c:v', 'libx264', 
+        '-preset', 'ultrafast', # Sangat cepat agar user tidak menunggu
+        '-t', '7', 
+        '-pix_fmt', 'yuv420p', 
+        out_path
+    ])
+
+    print("🎥 Mulai merender Live Photo Video 7 Detik...")
+    subprocess.run(cmd, capture_output=True)
+    print("✅ Live Photo selesai dirender!")
+    
+    return out_path
 
 @app.route('/api/session/<session_id>/apply-template', methods=['POST'])
 def api_apply_template(session_id):
-    """Terapkan template dan buat foto gabungan Full HD"""
+    import threading
+    import base64
+    from pathlib import Path
+    
     session = load_session(session_id)
     if not session:
         return jsonify({"error": "Session tidak ditemukan"}), 404
 
-    data = request.json
-    template_id = data.get('template_id', 'classic_strip')
-
-    # Jumlah foto sesuai photo_count dari JSON template
-    templates_dict = load_templates_from_disk()
-    tpl_config = templates_dict.get(template_id, {})
-    required = tpl_config.get("photo_count", len(tpl_config.get("photo_slots", [])) or 4)
-    if len(session["photos"]) < required:
-        return jsonify({"error": f"Template ini butuh {required} foto, baru ada {len(session['photos'])}"}), 400
-
+    data = request.json or {}
+    template_id = data.get('template_id')
+    
+    if not template_id:
+        return jsonify({"error": "template_id tidak diberikan"}), 400
+    
     try:
+        # 1. BIKIN FOTO STATIS DULU (Proses instan, langsung jadi)
+        templates = load_templates_from_disk()
+        if template_id not in templates:
+            return jsonify({"error": "Template tidak valid"}), 400
+            
+        required = templates[template_id].get('photo_count', 4)
+        
+        # Terapkan template overlay ke foto-foto jepretan
         paths = apply_template(session_id, template_id, session['photos'][:required])
-        # paths = {"grid_path": ..., "result_path": ...}
+        
+        # === UPDATE STATUS AWAL UNTUK VIDEO ===
+        # Beritahu sistem bahwa video mulai diproses
+        session['video_status'] = 'processing'
+        save_session(session)
+
+        # 2. THREAD PEMBUAT VIDEO (Berjalan paralel di latar belakang)
+        def render_bg():
+            # Load ulang file JSON sesi di dalam thread agar tidak ada tabrakan data (Race Condition)
+            bg_session = load_session(session_id) 
+            try:
+                # Panggil FFmpeg untuk merender klip-klip rekaman
+                apply_video_template(session_id, template_id)
+                bg_session['video_status'] = 'ready' # Lapor ke JSON: Sukses!
+                print(f"✅ [Thread] Video berhasil dibuat untuk sesi {session_id}")
+            except Exception as e:
+                print(f"❌ [Thread] Video background error: {e}")
+                bg_session['video_status'] = 'error' # Lapor ke JSON: Gagal!
+            
+            # Simpan laporan status terakhir ke file JSON
+            save_session(bg_session) 
+
+        # Jalankan mesin pembuat video tanpa menyuruh web menunggu
+        threading.Thread(target=render_bg, daemon=True).start()
+
+        # 3. SIMPAN DATA DAN KEMBALIKAN KE WEB DETIK ITU JUGA
+        video_name = f"live_result_{template_id}.mp4"
+        
         session['template']    = template_id
         session['grid_path']   = paths['grid_path']
         session['result_path'] = paths['result_path']
+        session['video_path']  = str(SESSIONS_DIR / session_id / video_name)
         session['status']      = 'template_applied'
         save_session(session)
 
+        # Baca hasil foto statis (JPEG) dan ubah ke Base64 agar web langsung bisa menampilkannya
         with open(paths['result_path'], 'rb') as f:
             img_data = base64.b64encode(f.read()).decode()
+
+        # Buat URL jalur agar web bisa memantau dan mengakses videonya nanti
+        video_url = f"/sessions/{session_id}/{video_name}"
 
         return jsonify({
             "success":      True,
             "result_image": f"data:image/jpeg;base64,{img_data}",
             "result_path":  paths['result_path'],
             "grid_path":    paths['grid_path'],
+            "video_url":    video_url
         })
+        
     except Exception as e:
+        print(f"Error di api_apply_template: {e}")
         return jsonify({"error": str(e)}), 500
 
+@app.route('/api/session/<session_id>/start_record', methods=['POST'])
+def api_start_record(session_id):
+    import subprocess
+    import threading
+    import time
+    import urllib.request
+    
+    data = request.json or {}
+    photo_index = data.get('photo_index', 1)
+    out_path = str(SESSIONS_DIR / session_id / f'vid_{photo_index}.mp4')
+    
+    def record_task():
+        # 1. Tembak gambar statis dari digiCamControl
+        cmd = [
+            'ffmpeg.exe', '-y', 
+            '-f', 'image2pipe',       
+            '-vcodec', 'mjpeg',       
+            # ==========================================
+            # PERBAIKAN: Turunkan target FPS secara drastis menjadi 6 FPS
+            # agar video berjalan perlahan dan natural
+            # ==========================================
+            '-framerate', '6',       
+            '-i', '-',                
+            '-c:v', 'libx264',        
+            '-preset', 'ultrafast',
+            '-pix_fmt', 'yuv420p',
+            out_path
+        ]
+        
+        process = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        
+        start_time = time.time()
+        
+        while time.time() - start_time < 5.5:
+            loop_start = time.time()
+            try:
+                # Ambil 1 frame statis dari digiCamControl
+                req = urllib.request.Request(f"{DCC_HOST}/liveview.jpg")
+                with urllib.request.urlopen(req, timeout=0.5) as response:
+                    frame_data = response.read()
+                    process.stdin.write(frame_data)
+            except Exception:
+                pass
+                
+            # ==========================================
+            # PERBAIKAN: Sesuaikan jeda waktu untuk 6 FPS
+            # 1 detik dibagi 6 frame = ~0.166 detik
+            # ==========================================
+            elapsed = time.time() - loop_start
+            sleep_time = 0.166 - elapsed # Beri kamera waktu lebih lama untuk me-refresh foto
+            if sleep_time > 0:
+                time.sleep(sleep_time)
+                
+        try:
+            process.stdin.close()
+            process.wait(timeout=2)
+        except Exception:
+            process.kill()
+
+    # Jalankan tugas kuli ini di background thread agar web tidak nge-lag
+    threading.Thread(target=record_task, daemon=True).start()
+    
+    return jsonify({"success": True})
+
+# Tambahkan helper route agar Web bisa mengakses video di dalam folder sessions
+@app.route('/sessions/<session_id>/<filename>')
+def serve_session_file(session_id, filename):
+    return send_from_directory(str(SESSIONS_DIR / session_id), filename)
+
+@app.route('/api/session/<session_id>/status', methods=['GET'])
+def api_session_status(session_id):
+    """Endpoint bagi web untuk mengecek apakah video sedang diproses, sukses, atau error."""
+    session = load_session(session_id)
+    if not session:
+        return jsonify({"error": "Sesi tidak ditemukan"}), 404
+    
+    # Secara default anggap 'processing' jika belum ada
+    status = session.get('video_status', 'processing') 
+    return jsonify({"video_status": status})
 
 @app.route('/api/session/<session_id>/upload-drive', methods=['POST'])
 def api_upload_drive(session_id):
