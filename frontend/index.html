@@ -791,7 +791,7 @@ let liveEl = null;  // elemen img MJPEG yang berjalan di dalam slot
 
 function startPrev(){
   // Cari slot aktif berikutnya
-  const nextIdx = S.n; // 0-based
+  const nextIdx = S.n; 
   const slots = S.tplData ? (S.tplData.photo_slots || []) : [];
   if(nextIdx >= slots.length) return;
 
@@ -801,14 +801,26 @@ function startPrev(){
   // Hapus live preview lama
   stopPrev(false);
 
-  // Buat elemen img MJPEG baru di dalam slot aktif
+  // Buat elemen img MJPEG baru
   liveEl = document.createElement('img');
   liveEl.id = 'live-preview-vid';
+  
+  // Tembak URL stream kamera
   liveEl.src = MJPEG + '?t=' + Date.now();
   liveEl.style.cssText = 'position:absolute;inset:0;width:100%;height:100%;object-fit:cover;z-index:1';
-  liveEl.onerror = () => showPrevError(slotEl);
+  
+  // ========================================================
+  // KUNCI 2: AUTO-REFRESH! Jika kamera belum siap (cermin masih proses naik), 
+  // browser tidak akan blank, melainkan mencoba terus!
+  // ========================================================
+  liveEl.onerror = () => {
+    liveEl.src = ''; // Bersihkan gambar rusak
+    setTimeout(() => { 
+        startPrev(); 
+    }, 500); // Coba lagi setengah detik kemudian
+  };
 
-  // Sembunyikan placeholder slot ini
+  // Sembunyikan placeholder slot
   const ph = slotEl.querySelector('.slot-empty-ph');
   if(ph) ph.style.display = 'none';
 
@@ -840,6 +852,7 @@ function vfErr(){ /* tidak dipakai lagi */ }
 async function doCapture(){
   if(S.busy||S.n>=S.required) return;
   S.busy=true;
+
   if(!S.sid){
     try{
       const d=await(await fetch(`${API}/session/start`,{method:'POST'})).json();
@@ -848,22 +861,45 @@ async function doCapture(){
       document.getElementById('rstbtn').classList.remove('hidden');
     }catch(e){toast('Gagal buat sesi','err');S.busy=false;return;}
   }
-  await countdown(); doFlash();
+
+  await countdown(); 
+  doFlash();
+
+  // KUNCI 1: Matikan Live View SEBELUM fetch agar kamera tidak "ditarik" dua arah
+  stopPrev(false);
+
   const btn=document.getElementById('capbtn');
   btn.disabled=true;
   document.getElementById('caplbl').textContent='Mengambil foto...';
   hlSlot(S.n+1);
+
   try{
+    // PERBAIKAN: URL endpoint yang benar sesuai app.py
     const d=await(await fetch(`${API}/session/${S.sid}/capture`,{method:'POST'})).json();
+
     if(d.success){
       S.n=d.total;
-      fillSlot(d.photo_index,d.thumbnail);
+      
+      // Fungsi fillSlot bawaan Anda sudah otomatis memanggil startPrev() 
+      // untuk kotak foto selanjutnya
+      fillSlot(d.photo_index, d.thumbnail);
       updateCounter();
       toast(`✅ Foto ${d.photo_index} berhasil!`,'ok');
+
       if(S.n>=S.required) setTimeout(processResult,800);
-    }else{ toast('Gagal: '+(d.error||'?'),'err'); }
-  }catch(e){ toast('Koneksi error','err'); }
-  clrSlot(); btn.disabled=false; updateCounter(); S.busy=false;
+    }else{ 
+      toast('Gagal: '+(d.error||'?'),'err'); 
+      startPrev(); // Tetap nyalakan Live View jika gagal
+    }
+  }catch(e){ 
+    toast('Koneksi error','err'); 
+    startPrev(); // Tetap nyalakan Live View jika gagal
+  }
+
+  clrSlot(); 
+  btn.disabled=false; 
+  updateCounter(); 
+  S.busy=false;
 }
 
 function fillSlot(i, thumb){

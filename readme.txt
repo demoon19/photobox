@@ -1,0 +1,1 @@
+alurnya berubah jadi yg awalnya ngambil live view dari api trs karena lambat jd diganti dari abis endpoint foto trs live view di digicam diclose buat ngeresest abis itu balik on lagi
