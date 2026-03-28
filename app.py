@@ -20,6 +20,8 @@ from flask_socketio import SocketIO, emit
 from PIL import Image, ImageDraw, ImageFont, ImageFilter
 import qrcode
 
+RECORD_STATE = {}
+
 # Google Drive
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
@@ -1019,6 +1021,10 @@ def api_session_start():
 
 @app.route('/api/session/<session_id>/capture', methods=['POST'])
 def api_capture(session_id):
+    
+    global RECORD_STATE
+    RECORD_STATE[session_id] = False
+
     """Ambil 1 foto, atau retake foto spesifik"""
     session = load_session(session_id)
     if not session:
@@ -1165,7 +1171,7 @@ def apply_video_template(session_id: str, template_id: str) -> str:
         '-preset', 'fast',      
         '-tune', 'ull',         
         '-b:v', '2M',
-        '-t', '5',                
+        '-t', '3',                
         '-pix_fmt', 'yuv420p', 
         out_path
     ])
@@ -1263,6 +1269,10 @@ def api_start_record(session_id):
     import time
     import urllib.request
     
+    # 1. NYALAKAN SAKLAR REKAMAN UNTUK SESI INI
+    global RECORD_STATE
+    RECORD_STATE[session_id] = True 
+    
     data = request.json or {}
     photo_index = data.get('photo_index', 1)
     out_path = str(SESSIONS_DIR / session_id / f'vid_{photo_index}.mp4')
@@ -1276,13 +1286,7 @@ def api_start_record(session_id):
             '-i', '-',                
             '-c:v', 'libx264',        
             '-preset', 'ultrafast',
-            
-            # ==========================================
-            # KITA GUNAKAN MODE BLEND (Ringan & Anti Corrupt)
-            # Namun kita paksa frame rate-nya menjadi 60 FPS!
-            # ==========================================
             '-vf', 'minterpolate=fps=60:mi_mode=blend', 
-            
             '-pix_fmt', 'yuv420p',
             out_path
         ]
@@ -1290,19 +1294,15 @@ def api_start_record(session_id):
         process = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         start_time = time.time()
         
-        while time.time() - start_time < 4.0:
+        # 2. REKAM NON-STOP SELAMA SAKLAR MASIH MENYALA!
+        # (Batas maksimal 8 detik hanya untuk jaga-jaga agar tidak error)
+        while RECORD_STATE.get(session_id, True) and (time.time() - start_time < 8.0):
             try:
                 req = urllib.request.Request(f"{DCC_HOST}/liveview.jpg")
                 with urllib.request.urlopen(req, timeout=0.3) as response:
                     process.stdin.write(response.read())
             except Exception:
                 pass
-                
-            # ==========================================
-            # KEMBALIKAN JEDA NAFAS!
-            # Ini WAJIB ada agar digiCamControl tidak nge-hang
-            # dan tetap bisa menerima perintah jepret kamera.
-            # ==========================================
             time.sleep(0.08)
                 
         try:
