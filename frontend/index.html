@@ -1035,39 +1035,41 @@ async function processResult(){
     })).json();
     
     if(d.success){
-      // Tampilkan video jika berhasil dibuat!
+      // 1. Tampilkan FOTO STATIS dulu sambil menunggu video selesai dirakit
+      const resContainer = document.getElementById('resimg');
+      resContainer.innerHTML = `<img src="${d.result_url}?t=${Date.now()}" alt="Hasil Foto" style="border-radius:14px;box-shadow:0 8px 30px rgba(0,0,0,0.5);" />`;
+      toast('✨ Foto selesai! Sedang memproses efek Live Video...', 'info');
+
       // 2. RADAR VIDEO PINTAR: Mengecek status ke Python
       if(d.video_url) {
           const checkVid = setInterval(async () => {
               try {
-                  // Tanya ke Python: "Gimana status video sesi ini?"
                   const statRes = await fetch(`${API}/session/${S.sid}/status`);
                   const statData = await statRes.json();
                   
                   if(statData.video_status === 'ready') {
-                      // Jika sukses, matikan radar & tampilkan video
                       clearInterval(checkVid); 
-                      resImg.innerHTML = `<video src="${d.video_url}?t=${Date.now()}" autoplay loop muted style="max-width:100%;max-height:70vh;border-radius:14px;box-shadow:0 8px 30px rgba(0,0,0,0.5);"></video>`;
+                      // PERBAIKAN: Gunakan document.getElementById('resimg') yang benar!
+                      document.getElementById('resimg').innerHTML = `<video src="${d.video_url}?t=${Date.now()}" autoplay loop muted playsinline style="max-width:100%;max-height:70vh;border-radius:14px;box-shadow:0 8px 30px rgba(0,0,0,0.5);"></video>`;
                       toast('🎥 Live Video Siap!','ok');
                       
                   } else if(statData.video_status === 'error') {
-                      // Jika Python melapor error, matikan radar & beritahu pengguna
                       clearInterval(checkVid);
-                      const statusTxt = document.getElementById('vid-status');
-                      if(statusTxt) {
-                          statusTxt.innerHTML = '⚠️ <i>Maaf, Live Video gagal diproses. Menampilkan foto statis.</i>';
-                          statusTxt.style.color = 'var(--err)'; // Beri warna merah/error
-                          statusTxt.style.animation = 'none';   // Matikan efek kelap-kelip
-                      }
-                      toast('Gagal memproses video klip','err');
+                      toast('⚠️ Live Video gagal diproses. Menampilkan foto statis.','err');
                   }
-                  // Jika status masih 'processing', biarkan radar terus berputar
-              } catch(e) {}
+              } catch(e) {
+                  // Munculkan error di console agar tidak diam-diam macet
+                  console.error("Error saat mengecek status video:", e);
+              }
           }, 2000); // Cek setiap 2 detik
       }
-      toast('✨ Foto & Video Live selesai!','ok');
-    }else{ toast('Template gagal: '+d.error,'err'); }
-  }catch(e){ toast('Error server','err'); }
+    }else{ 
+      toast('Template gagal: '+d.error,'err'); 
+    }
+  }catch(e){ 
+    toast('Error server','err'); 
+    console.error(e);
+  }
 }
 
 async function uploadDrive(){
