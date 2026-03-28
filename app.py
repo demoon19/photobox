@@ -3,6 +3,7 @@ PhotoBox Backend - Canon 700D Integration
 Flask server yang menangani: kamera, template, Google Drive, QR Code
 """
 
+import cmd
 import os
 import io
 import json
@@ -1126,7 +1127,7 @@ def apply_video_template(session_id: str, template_id: str) -> str:
         else:
             # Fallback jika video gagal direkam: pakai foto statis
             img_path = session_dir / 'photos' / f'photo_{i+1}.jpg'
-            cmd.extend(['-loop', '1', '-t', '7', '-i', str(img_path)])
+            cmd.extend(['-loop', '1', '-t', '5', '-i', str(img_path)])
 
     # Input N+1: Template Overlay (PNG Canva)
     bg_path = ASSETS_TEMPLATES_DIR / config.get('background_image', '')
@@ -1160,9 +1161,11 @@ def apply_video_template(session_id: str, template_id: str) -> str:
     cmd.extend([
         '-filter_complex', filter_str, 
         '-map', f'[{last_ov}]', 
-        '-c:v', 'libx264', 
-        '-preset', 'ultrafast', # Sangat cepat agar user tidak menunggu
-        '-t', '7', 
+        '-c:v', 'h264_nvenc',   
+        '-preset', 'fast',      
+        '-tune', 'ull',         
+        '-b:v', '2M',
+        '-t', '5',                
         '-pix_fmt', 'yuv420p', 
         out_path
     ])
@@ -1265,56 +1268,47 @@ def api_start_record(session_id):
     out_path = str(SESSIONS_DIR / session_id / f'vid_{photo_index}.mp4')
     
     def record_task():
-        # 1. Tembak gambar statis dari digiCamControl
         cmd = [
             'ffmpeg.exe', '-y', 
+            '-use_wallclock_as_timestamps', '1', 
             '-f', 'image2pipe',       
             '-vcodec', 'mjpeg',       
-            # ==========================================
-            # PERBAIKAN: Turunkan target FPS secara drastis menjadi 6 FPS
-            # agar video berjalan perlahan dan natural
-            # ==========================================
-            '-framerate', '6',       
             '-i', '-',                
             '-c:v', 'libx264',        
             '-preset', 'ultrafast',
+            
+            # ==========================================
+            # SIHIR BARU: Frame Interpolation (Blend Mode)
+            # Menyulap input 5-8 FPS menjadi output 30 FPS yang sangat mulus
+            # dengan menciptakan bayangan transisi antar foto!
+            # ==========================================
+            '-vf', 'minterpolate=fps=30:mi_mode=blend', 
+            
             '-pix_fmt', 'yuv420p',
             out_path
         ]
         
         process = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        
         start_time = time.time()
         
-        while time.time() - start_time < 5.5:
-            loop_start = time.time()
+        # ==========================================
+        # DURASI BARU: Rekam tepat selama 4.0 detik
+        # ==========================================
+        while time.time() - start_time < 4.0:
             try:
-                # Ambil 1 frame statis dari digiCamControl
                 req = urllib.request.Request(f"{DCC_HOST}/liveview.jpg")
                 with urllib.request.urlopen(req, timeout=0.5) as response:
-                    frame_data = response.read()
-                    process.stdin.write(frame_data)
+                    process.stdin.write(response.read())
             except Exception:
                 pass
                 
-            # ==========================================
-            # PERBAIKAN: Sesuaikan jeda waktu untuk 6 FPS
-            # 1 detik dibagi 6 frame = ~0.166 detik
-            # ==========================================
-            elapsed = time.time() - loop_start
-            sleep_time = 0.166 - elapsed # Beri kamera waktu lebih lama untuk me-refresh foto
-            if sleep_time > 0:
-                time.sleep(sleep_time)
-                
         try:
             process.stdin.close()
-            process.wait(timeout=2)
+            process.wait(timeout=3)
         except Exception:
             process.kill()
 
-    # Jalankan tugas kuli ini di background thread agar web tidak nge-lag
     threading.Thread(target=record_task, daemon=True).start()
-    
     return jsonify({"success": True})
 
 # Tambahkan helper route agar Web bisa mengakses video di dalam folder sessions

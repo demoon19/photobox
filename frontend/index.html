@@ -803,9 +803,6 @@ function updateCounter(){
   }
 }
 
-let liveRecorder = null;
-let liveChunks = [];
-let liveInterval = null;
 
 function startVideoRecord() {
   const img = document.getElementById('live-preview-vid');
@@ -827,28 +824,6 @@ function startVideoRecord() {
   liveChunks = [];
   liveRecorder.ondataavailable = e => { if (e.data.size > 0) liveChunks.push(e.data); };
   liveRecorder.start();
-}
-
-async function stopAndUploadVideo(photoIndex) {
-  return new Promise(resolve => {
-    if (!liveRecorder || liveRecorder.state === 'inactive') return resolve();
-    
-    liveRecorder.onstop = async () => {
-      clearInterval(liveInterval);
-      const blob = new Blob(liveChunks, { type: 'video/webm' });
-      
-      // Kirim video WebM ke server Python
-      const fd = new FormData();
-      fd.append('video', blob, `vid_${photoIndex}.webm`);
-      fd.append('photo_index', photoIndex);
-      
-      try {
-        await fetch(`${API}/session/${S.sid}/upload_video`, { method: 'POST', body: fd });
-      } catch (e) { console.error("Gagal upload video", e); }
-      resolve();
-    };
-    liveRecorder.stop();
-  });
 }
 
 // ── Preview — masuk ke slot aktif dalam template ──────────────────────────────
@@ -974,7 +949,6 @@ async function doCapture(){
       // Video akan berhenti TEPAT SAAT foto aslinya berhasil ditangkap!
       // ==========================================
       document.getElementById('caplbl').textContent='Menyimpan klip video...';
-      await stopAndUploadVideo(d.photo_index);
       
       fillSlot(d.photo_index, d.thumbnail);
       toast(S.retakeIdx ? `✅ Retake Foto ${d.photo_index} berhasil!` : `✅ Foto ${d.photo_index} berhasil!`,'ok');
