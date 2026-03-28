@@ -1171,7 +1171,7 @@ def apply_video_template(session_id: str, template_id: str) -> str:
         '-preset', 'fast',      
         '-tune', 'ull',         
         '-b:v', '2M',
-        '-t', '3',                
+        '-t', '2.5',                
         '-pix_fmt', 'yuv420p', 
         out_path
     ])
