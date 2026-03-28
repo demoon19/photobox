@@ -1278,11 +1278,10 @@ def api_start_record(session_id):
             '-preset', 'ultrafast',
             
             # ==========================================
-            # SIHIR BARU: Frame Interpolation (Blend Mode)
-            # Menyulap input 5-8 FPS menjadi output 30 FPS yang sangat mulus
-            # dengan menciptakan bayangan transisi antar foto!
+            # KITA GUNAKAN MODE BLEND (Ringan & Anti Corrupt)
+            # Namun kita paksa frame rate-nya menjadi 60 FPS!
             # ==========================================
-            '-vf', 'minterpolate=fps=30:mi_mode=blend', 
+            '-vf', 'minterpolate=fps=60:mi_mode=blend', 
             
             '-pix_fmt', 'yuv420p',
             out_path
@@ -1291,16 +1290,20 @@ def api_start_record(session_id):
         process = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         start_time = time.time()
         
-        # ==========================================
-        # DURASI BARU: Rekam tepat selama 4.0 detik
-        # ==========================================
         while time.time() - start_time < 4.0:
             try:
                 req = urllib.request.Request(f"{DCC_HOST}/liveview.jpg")
-                with urllib.request.urlopen(req, timeout=0.5) as response:
+                with urllib.request.urlopen(req, timeout=0.3) as response:
                     process.stdin.write(response.read())
             except Exception:
                 pass
+                
+            # ==========================================
+            # KEMBALIKAN JEDA NAFAS!
+            # Ini WAJIB ada agar digiCamControl tidak nge-hang
+            # dan tetap bisa menerima perintah jepret kamera.
+            # ==========================================
+            time.sleep(0.08)
                 
         try:
             process.stdin.close()
