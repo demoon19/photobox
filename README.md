@@ -71,23 +71,14 @@ Hardware:
 
 photobox-main/
 │── app.py
-
 │── app1.py
-
 │── requirements.txt
-
 │
-
 ├── frontend/
-
 ├── assets/
-
 ├── sessions/
-
 ├── photos/
-
 ├── templates/
-
 ├── fonts/
 
 ---
