@@ -65,23 +65,6 @@ Frontend:
 Hardware:
 - Canon DSLR (via digiCamControl)
 
----
-
-## 📂 Project Structure
-
-photobox-main/
-
-│── app.py
-
-│── app1.py
-│── requirements.txt
-│
-├── frontend/
-├── assets/
-├── sessions/
-├── photos/
-├── templates/
-├── fonts/
 
 ---
 
