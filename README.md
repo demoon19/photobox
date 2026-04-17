@@ -68,10 +68,8 @@ Hardware:
 
 ---
 
----
-
 ## 📂 Project Structure
-``
+```
 photobox-main/
 │── app.py
 │── app1.py
@@ -83,7 +81,7 @@ photobox-main/
 ├── photos/
 ├── templates/
 ├── fonts/
-``
+```
 
 ---
 
