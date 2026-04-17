@@ -86,7 +86,7 @@ photobox-main/
 ## ⚙️ Installation
 
 ```bash
-git clone https://github.com/username/photobox.git
+git clone https://github.com/demoon19/photobox/tree/photoboxV3
 cd photobox-main
 pip install -r requirements.txt
 ```
