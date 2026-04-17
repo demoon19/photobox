@@ -70,6 +70,7 @@ Hardware:
 ## 📂 Project Structure
 
 photobox-main/
+
 │── app.py
 │── app1.py
 │── requirements.txt
